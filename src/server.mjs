@@ -137,9 +137,14 @@ export function createProxyServer(config, {
     probeTimer.unref?.()
   }
   let panelHtml
-  let panelJs
-  let panelCss
-  const panelMime = { '/panel.js': 'text/javascript; charset=utf-8', '/panel.css': 'text/css; charset=utf-8' }
+  // Built Vue panel: index.html + app.js + app.css (no inline script, no eval).
+  const panelMime = {
+    '/app.js': 'text/javascript; charset=utf-8',
+    '/app.css': 'text/css; charset=utf-8',
+    '/panel.js': 'text/javascript; charset=utf-8',
+    '/panel.css': 'text/css; charset=utf-8',
+  }
+  const panelAssets = ['/app.js', '/app.css', '/panel.js', '/panel.css']
   let updateChain = Promise.resolve()
 
   function installRuntime(candidate) {
@@ -176,14 +181,13 @@ export function createProxyServer(config, {
     response.setHeader('x-frame-options', 'DENY')
     const url = new URL(request.url || '/', 'http://localhost')
 
-    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/panel.js' || url.pathname === '/panel.css')) {
+    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html' || panelAssets.includes(url.pathname))) {
       if (!panelAuthorized(request, runtime.config)) throw new HttpError(403, '管理面板默认仅允许本机访问；需显式配置 allowPanelFromLan', 'panel_local_only')
       response.setHeader('content-security-policy', PANEL_CSP)
+      // Hashed/immutable assets could cache, but the panel is small and must never show stale logic.
       response.setHeader('cache-control', 'no-store')
       if (panelMime[url.pathname]) {
-        const content = url.pathname === '/panel.js'
-          ? (panelJs ??= await readFile(new URL('./panel/panel.js', import.meta.url), 'utf8'))
-          : (panelCss ??= await readFile(new URL('./panel/panel.css', import.meta.url), 'utf8'))
+        const content = await readFile(new URL(`./panel${url.pathname}`, import.meta.url), 'utf8')
         response.writeHead(200, { 'content-type': panelMime[url.pathname] }).end(content)
       } else {
         panelHtml ??= await readFile(new URL('./panel/index.html', import.meta.url), 'utf8')

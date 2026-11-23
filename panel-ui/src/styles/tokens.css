@@ -1,0 +1,81 @@
+/* Design tokens: one palette, two themes. Everything else derives from these. */
+:root {
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 22px;
+  --sp-6: 30px;
+  --sp-7: 40px;
+  --dur: 180ms;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-theme="dark"] {
+  --bg: #08090d;
+  --bg-elev: #0d0f15;
+  --surface: #12141c;
+  --surface-2: #171a24;
+  --surface-3: #1e2230;
+  --line: #232838;
+  --line-soft: #1a1e2a;
+  --text: #f2f4fa;
+  --text-2: #c3c9d9;
+  --dim: #8b93a8;
+  --dim-2: #646c80;
+  --accent: #7c6cff;
+  --accent-2: #a394ff;
+  --accent-soft: rgba(124, 108, 255, 0.14);
+  --accent-glow: rgba(124, 108, 255, 0.35);
+  --green: #35d39a;
+  --green-soft: rgba(53, 211, 154, 0.13);
+  --red: #ff6b81;
+  --red-soft: rgba(255, 107, 129, 0.13);
+  --amber: #ffb545;
+  --amber-soft: rgba(255, 181, 69, 0.13);
+  --blue: #4fb8ff;
+  --blue-soft: rgba(79, 184, 255, 0.13);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 24px 60px -18px rgba(0, 0, 0, 0.85);
+  --grad-hero: radial-gradient(120% 140% at 12% 0%, rgba(124, 108, 255, 0.20), transparent 52%),
+               radial-gradient(90% 120% at 100% 10%, rgba(79, 184, 255, 0.12), transparent 55%);
+}
+
+[data-theme="light"] {
+  --bg: #f6f7fb;
+  --bg-elev: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f8f9fd;
+  --surface-3: #eef0f8;
+  --line: #e2e5f0;
+  --line-soft: #eef0f7;
+  --text: #10131c;
+  --text-2: #3d4457;
+  --dim: #6b7286;
+  --dim-2: #949cb0;
+  --accent: #5b48e8;
+  --accent-2: #4a37d6;
+  --accent-soft: rgba(91, 72, 232, 0.09);
+  --accent-glow: rgba(91, 72, 232, 0.22);
+  --green: #0e9f6e;
+  --green-soft: rgba(14, 159, 110, 0.10);
+  --red: #e02c4e;
+  --red-soft: rgba(224, 44, 78, 0.09);
+  --amber: #c47f10;
+  --amber-soft: rgba(196, 127, 16, 0.10);
+  --blue: #0b7ec4;
+  --blue-soft: rgba(11, 126, 196, 0.09);
+  --shadow-sm: 0 1px 2px rgba(16, 19, 28, 0.06);
+  --shadow: 0 8px 24px -10px rgba(16, 19, 28, 0.16);
+  --shadow-lg: 0 24px 60px -20px rgba(16, 19, 28, 0.22);
+  --grad-hero: radial-gradient(120% 140% at 12% 0%, rgba(91, 72, 232, 0.10), transparent 52%),
+               radial-gradient(90% 120% at 100% 10%, rgba(11, 126, 196, 0.07), transparent 55%);
+}
