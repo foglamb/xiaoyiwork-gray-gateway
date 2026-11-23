@@ -200,6 +200,8 @@ export function createProxyServer(config, {
         quotaError: quotaError.get(account.id)?.message || null,
         source: account.source || 'manual',
         displayName: account.displayName || null,
+        cooling: runtime.pool.isCooling(account),
+        coolingUntil: runtime.pool.cooldownUntil.get(account.id) || null,
       })))
       // Refresh quota for accounts that have never been queried or are stale, without blocking the panel.
       for (const account of [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]) {
@@ -213,6 +215,7 @@ export function createProxyServer(config, {
         endpoint: { baseUrl: `http://127.0.0.1:${runtime.config.port}/v1`, lanUrls: lanUrls(runtime.config.port), currentUrl: `http://${validHost}/v1` },
         gray: configView.gray, allowGrayModels: configView.allowGrayModels, grayModels: runtime.config.grayModels,
         accounts, stats: runtime.pool.stats, logStats: requestLog.stats(), spend,
+        failover: { cooldownSeconds: 60, maxAttempts: 6, cooling: [...runtime.pool.cooldownUntil.keys()] },
         quota: {
           points: [...quotaCache.values()].reduce((sum, item) => sum + (item.windows || []).reduce((n, w) => n + (typeof w.remaining === 'number' ? w.remaining : 0), 0), 0),
           accounts: quotaCache.size,

@@ -27,14 +27,51 @@ export class AccountPool {
     }
   }
 
-  select(route) {
-    const selected = this.config.accounts[route.pool]
-    if (!selected?.length) throw new HttpError(503, `${route.pool} 池暂无账号，请在管理面板「账号池」中添加小艺Work 凭据`, 'account_pool_empty')
+  /** Accounts temporarily skipped after auth/limit failures, with expiry timestamps. */
+  cooldownUntil = new Map()
+
+  isCooling(account) {
+    const until = this.cooldownUntil.get(account.id)
+    if (!until) return false
+    if (Date.now() >= until) { this.cooldownUntil.delete(account.id); return false }
+    return true
+  }
+
+  cool(account, ms = 60000, reason = '') {
+    this.cooldownUntil.set(account.id, Date.now() + ms)
+    this.stats.cooldowns = (this.stats.cooldowns || 0) + 1
+    this.logger.log(`[pool] account=${account.id} cooling ${Math.round(ms / 1000)}s (${reason || 'failure'})`)
+  }
+
+  clearCool(account) {
+    this.cooldownUntil.delete(account.id)
+  }
+
+  poolAccounts(pool) {
+    return this.config.accounts[pool] || []
+  }
+
+  /**
+   * Ordered candidates for one request: start at the round-robin position, then
+   * walk every other account in the same pool so a dead account never blocks a call.
+   * Accounts in cooldown are placed last instead of being removed, so a fully
+   * cooling pool still attempts something rather than failing outright.
+   */
+  candidates(route, { exclude = new Set() } = {}) {
     const pool = route.pool
-    const accounts = selected
-    const index = this.cursors[pool]++ % accounts.length
+    const accounts = this.poolAccounts(pool)
+    if (!accounts.length) throw new HttpError(503, `${pool} 池暂无账号，请在管理面板「账号池」中添加小艺Work 凭据`, 'account_pool_empty')
+    const start = this.cursors[pool]++ % accounts.length
     this.cursors[pool] %= accounts.length
-    return { account: accounts[index], pool }
+    const ordered = [...accounts.slice(start), ...accounts.slice(0, start)]
+    const fresh = ordered.filter((account) => !exclude.has(account.id) && !this.isCooling(account))
+    const cooling = ordered.filter((account) => !exclude.has(account.id) && this.isCooling(account))
+    return [...fresh, ...cooling]
+  }
+
+  select(route) {
+    const account = this.candidates(route)[0]
+    return { account, pool: route.pool }
   }
 
   async persist() {
@@ -119,37 +156,87 @@ export class AccountPool {
     this.stats.byAccount[account.id] = (this.stats.byAccount[account.id] || 0) + 1
   }
 
+  /**
+   * Seamless failover: try each account in the pool until one succeeds.
+   * - 401/403: renew credentials once, then move on if it still fails.
+   * - 429: cool the account down, try the next one.
+   * - 5xx / network: cool briefly, try the next one.
+   * The client sees one request; it never learns an account was swapped.
+   */
   async chat(body, route, { signal, configPath = this.configPath, onUsage } = {}) {
-    const { account, pool } = this.select(route)
     this.configPath = configPath
-    this.record(route, account)
     const outgoing = { ...body, stream: true }
-    const execute = () => this.fetch(this.config.upstreamUrl, {
-      method: 'POST',
-      headers: authHeaders(account),
-      body: JSON.stringify(outgoing),
-      signal,
-    })
-    let response
-    try {
-      response = await execute()
-      if ([401, 403].includes(response.status) && account.refreshToken) {
-        await response.body?.cancel()
-        await this.renew(account)
+    const attempted = new Set()
+    const failures = []
+    let lastError = null
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const ordered = this.candidates(route, { exclude: attempted })
+      if (!ordered.length) break
+      const account = ordered[0]
+      attempted.add(account.id)
+      this.record(route, account)
+      const execute = () => this.fetch(this.config.upstreamUrl, {
+        method: 'POST',
+        headers: authHeaders(account),
+        body: JSON.stringify(outgoing),
+        signal,
+      })
+      let response
+      try {
         response = await execute()
+        if ([401, 403].includes(response.status) && account.refreshToken) {
+          await response.body?.cancel().catch(() => {})
+          try {
+            await this.renew(account)
+            response = await execute()
+          } catch (error) {
+            lastError = error
+          }
+        }
+      } catch (error) {
+        this.stats.upstreamErrors++
+        if (signal?.aborted) throw error
+        this.cool(account, 30000, 'network')
+        failures.push({ account: account.id, status: 0, reason: error.message })
+        lastError = new HttpError(502, `上游连接失败：${error.message}`, 'upstream_unavailable')
+        continue
       }
-    } catch (error) {
+
+      if (response.ok && response.body) {
+        this.clearCool(account)
+        this.stats.failovers = (this.stats.failovers || 0) + (attempt > 0 ? 1 : 0)
+        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage })
+      }
+
       this.stats.upstreamErrors++
-      if (signal?.aborted) throw error
-      throw new HttpError(502, `上游连接失败：${error.message}`, 'upstream_unavailable')
-    }
-    if (!response.ok) {
-      this.stats.upstreamErrors++
+      const status = response.status
       const text = await response.text().catch(() => '')
-      throw new HttpError(response.status, `小艺Work 上游 HTTP ${response.status}：${text.slice(0, 1000)}`,
-        [401, 403].includes(response.status) ? 'authentication_error' : 'upstream_error')
+      failures.push({ account: account.id, status, reason: text.slice(0, 200) })
+      lastError = new HttpError(status, `小艺Work 上游 HTTP ${status}：${text.slice(0, 1000)}`,
+        [401, 403].includes(status) ? 'authentication_error' : 'upstream_error')
+
+      if ([401, 403].includes(status)) {
+        // Credential is genuinely unusable: keep it out of rotation and try the next account.
+        this.cool(account, 300000, `auth ${status}`)
+        continue
+      }
+      if (status === 429) { this.cool(account, 120000, 'rate limit'); continue }
+      if (status >= 500) { this.cool(account, 60000, `upstream ${status}`); continue }
+      if (status === 400 || status === 404 || status === 413) {
+        // Request-shape errors are not account problems: do not retry elsewhere.
+        throw lastError
+      }
+      this.cool(account, 60000, `http ${status}`)
     }
-    if (!response.body) throw new HttpError(502, '上游响应没有 body', 'upstream_error')
+
+    const detail = failures.length ? `；尝试 ${failures.length} 个账号：${failures.map((f) => `${f.account}(${f.status || 'network'})`).join(', ')}` : ''
+    throw lastError
+      ? new HttpError(lastError.status || 502, `${lastError.message}${detail}`, lastError.code || 'upstream_error')
+      : new HttpError(503, `${route.pool} 池没有可用账号，请检查凭据或在面板重新登录${detail}`, 'account_pool_empty')
+  }
+
+  #respond({ response, account, route, pool, body, signal, onUsage }) {
     const headers = new Headers({
       'x-xiaoyi-route': route.selected ? 'gray' : 'stable',
       'x-xiaoyi-pool': pool,
@@ -164,10 +251,12 @@ export class AccountPool {
       headers.set('x-accel-buffering', 'no')
       return new Response(transformSse(response.body, body.model, { signal, onUsage }), { status: 200, headers })
     }
-    const result = await aggregateSse(response.body, body.model, { signal, onUsage })
-    headers.set('content-type', 'application/json; charset=utf-8')
-    return new Response(JSON.stringify(result), { status: 200, headers })
+    return aggregateSse(response.body, body.model, { signal, onUsage }).then((result) => {
+      headers.set('content-type', 'application/json; charset=utf-8')
+      return new Response(JSON.stringify(result), { status: 200, headers })
+    })
   }
+
   async quota(account) {
     const base = this.#upstreamOrigin()
     const query = (agentId) => this.fetch(`${base}/ability-billing/v1/agent-purchases-client/privilege/query`, {
