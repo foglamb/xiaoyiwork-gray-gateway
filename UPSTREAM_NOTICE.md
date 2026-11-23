@@ -10,6 +10,13 @@ its SSE-to-OpenAI normalization and non-stream aggregation, and the back-to-back
 credential-refresh/credential-create sequence. It does not bundle the upstream plugin,
 Windows registry/DPAPI code, or plugin icon.
 
+Interface and launcher reference (independent implementation, no bundled source):
+- Project: https://github.com/lijieyu233/workbuddy-gateway
+- Revision reviewed: `f5d26d5d424fa7565403ff3e959822e008ddce30`
+- Reference README/package declare MIT. The panel in this project was independently
+  implemented for XiaoyiWork and does not bundle WorkBuddy account, channel,
+  sanitization, Electron, sign-in or upstream API code.
+
 MIT License
 
 Copyright (c) 2026 opencode-xiaoyiwork-auth contributors

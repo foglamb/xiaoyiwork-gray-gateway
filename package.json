@@ -1,15 +1,18 @@
 {
   "name": "xiaoyiwork-gray-proxy",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "OpenAI-compatible XiaoyiWork reverse proxy with deterministic canary routing",
+  "description": "XiaoyiWork OpenAI-compatible gateway with a web panel and deterministic canary routing",
+  "bin": { "xiaoyiwork-gateway": "src/cli.mjs" },
   "engines": { "node": ">=22.0.0" },
   "scripts": {
-    "start": "node src/server.mjs",
-    "dev": "node --watch src/server.mjs",
+    "start": "node src/cli.mjs",
+    "start:open": "node src/cli.mjs --open",
+    "start:lan": "node src/cli.mjs --lan --open",
+    "dev": "node --watch src/cli.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "check": "node --check src/server.mjs && node --check src/proxy.mjs && node --check src/upstream.mjs"
+    "check": "node --check src/server.mjs && node --check src/pool.mjs && node --check src/canary.mjs && node --check src/upstream.mjs && node --check src/requestlog.mjs && node --check src/network.mjs && node --check src/cli.mjs && node --check src/proxy.mjs && node --check src/panel/panel.js"
   },
   "license": "MIT"
 }

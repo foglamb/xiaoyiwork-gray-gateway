@@ -10,4 +10,4 @@ EXPOSE 17356
 VOLUME ["/app/config"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:17356/healthz || exit 1
-CMD ["node", "src/server.mjs"]
+CMD ["node", "src/cli.mjs", "--lan"]

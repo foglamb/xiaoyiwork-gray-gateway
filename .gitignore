@@ -1,7 +1,9 @@
 node_modules/
 config/config.json
 config/*.tmp
+config/requests.jsonl
 *.log
 *.tgz
 .env
 .DS_Store
+artifacts/

@@ -1,36 +1,75 @@
-# 小艺Work OpenAI 兼容灰度反代
+# 小艺Work 灰度网关 v2.0
 
-独立 Node.js 服务，不修改上游 magpie/OpenCode 插件。客户端使用
-`POST /v1/chat/completions`，反代把凭据换成小艺Work 三件套，按稳定身份灰度分桶，
-再转到 `stable` / `gray` 账号池。Node.js **22+**，零 npm 运行依赖。
+独立 Node.js 服务，带**中文 Web 管理面板**，不修改上游 magpie/OpenCode 插件。
+参考 [workbuddy-gateway](https://github.com/lijieyu233/workbuddy-gateway) 的卡片网格、
+深/浅主题、账号池与请求记录形态重新实现；认证与转发对象仍是小艺Work，不包含
+WorkBuddy 的渠道净化、签到或 WorkBuddy 账号导入逻辑。Node.js **22+**，零 npm 运行依赖。
 
-## 启动
+![灰度控制台](artifacts/panel-overview.png)
+
+## 一键启动
+
+### Windows
+
+1. 复制 `config/config.example.json` 为 `config/config.json`，填写你自己的凭据和密钥。
+2. 双击 **`start.bat`**，服务启动后自动打开面板。
+3. `start-lan.bat` 为局域网模式。管理接口默认仍只允许本机访问。
+
+### Linux / macOS / 命令行
 
 ```bash
-cd opencode-xiaoyiwork-proxy
 cp config/config.example.json config/config.json
-# 修改 config.json 的两个访问密钥、上游凭据与灰度 salt
-npm test
-npm start
+# 修改 config.json 的两个访问密钥、灰度 salt、上游凭据
+chmod 600 config/config.json
+npm start -- --open
 ```
 
-从原项目 magpie 的 `plugin-auth.json` 中复制你自己账号的
-`businessCredential`、`uid`、`deviceId` 和 `refreshToken`，不要从浏览器或他人账号导出。
-`gray` 池可填写同一个账号，也可用单独账号做配额隔离；使用独立灰度账号时，
-不要主动刷新共享同一账号的另一槽位——原项目已指出签新票会使旧票失效。
+也可直接执行 `./start.sh`。其它启动参数：
 
-`config/config.json` 不会进入版本控制。生产环境建议通过受控部署生成，权限设为 `600`。
-监听地址默认 `0.0.0.0`；公网部署务必在前面放 HTTPS 终止层，且限制 `/_admin/*` 的访问来源。
-若工作目录不在项目根目录，设置 `XIAOYI_PROXY_CONFIG=/绝对路径/config/config.json`。
+```bash
+node src/cli.mjs --local --open        # 默认：仅本机 127.0.0.1
+node src/cli.mjs --lan --open          # 局域网 API
+node src/cli.mjs --port 6000 --open    # 指定端口
+node src/cli.mjs --help
+```
 
-Docker 部署（`config/config.json` 已填写后）：
+- 面板：`http://127.0.0.1:17356`
+- API：`http://127.0.0.1:17356/v1`
+- 首次进入面板输入配置文件里的 `adminKey`。
+- 本程序不替代当前已打开的其它 Web 应用；启动后需自行打开上面显示的面板地址。
+- 自定义配置位置：`XIAOYI_PROXY_CONFIG=/绝对路径/config.json` 或 `--config 路径`。
+
+## 面板功能
+
+| 页面 | 已实现功能 |
+|---|---|
+| 灰度控制台 | 启用/停用、0–100% 滑块、1/5/10/25/100% 快捷档、一键回滚、稳定/灰度请求分布 |
+| 账号池 | 稳定/灰度分栏、添加、删除、自动续期状态、请求数、手动查询会员积分与权益包 |
+| 模型 | 模型卡片、ID 复制、倍率/视觉能力、灰度模型启停确认 |
+| 请求记录 | 路由池、账号、结果、耗时、Token；清空日志 |
+| 设置 | API/Admin 密钥轮换、超时、Header/Cookie 灰度开关、客户端配置复制 |
+| 通用 | 深色/浅色主题、移动端布局、管理密钥仅保存于 sessionStorage |
+
+白名单、黑名单、分桶 salt 等高级灰度字段仍通过 `/_admin/gray` 或配置文件维护。
+
+从原项目 magpie 的 `plugin-auth.json` 中复制**你自己账号**的 `businessCredential`、
+`uid`、`deviceId` 和 `refreshToken`。建议 stable/gray 使用独立账号：原项目指出
+签新票会让同账号旧票失效，本服务不会回写小艺Work 的 Windows 注册表。
+
+`config/config.json` 被 `.gitignore` 排除，建议权限 `0600`。默认仅监听
+`127.0.0.1`。如果改用 `--lan`，API 会监听局域网；面板接口仍按真实来源 IP 限制本机，
+不采信 `X-Forwarded-For`。只有确有需要才在配置中设置 `allowPanelFromLan: true`，
+并同时配置 HTTPS 与网络访问控制，不应直接暴露公网。
+
+### Docker
 
 ```bash
 docker compose up -d --build
 curl http://127.0.0.1:17356/healthz
 ```
 
-Compose 默认只绑定 `127.0.0.1:17356`，配置目录可写用于原子保存续期凭据与热更新。
+Compose 默认只映射 `127.0.0.1:17356`。配置目录挂载可写，用于原子保存灰度设置、
+续期凭据与请求元数据。
 
 ## 灰度语义
 
@@ -131,9 +170,16 @@ print(answer.choices[0].message.content)
 
 | 方法 | 路径 | 鉴权 | 用途 |
 |---|---|---|---|
+| GET | `/` | 本机 + Admin key | Web 管理面板 |
 | GET | `/healthz` | 无 | 存活检查，不含账号信息 |
 | GET | `/v1/models` | API key | 模型清单，默认不含灰度模型 |
 | POST | `/v1/chat/completions` | API key | 流式/非流式聊天反代 |
+| GET | `/api/state` | 本机 + Admin key | 面板聚合状态 |
+| GET/POST | `/api/keys` | 本机 + Admin key | 查看/轮换访问密钥 |
+| POST/DELETE | `/api/accounts`、`/api/accounts/:id` | 本机 + Admin key | 添加/删除账号 |
+| POST | `/api/accounts/:id/quota` | 本机 + Admin key | 查询积分与权益包 |
+| GET | `/api/logs` | 本机 + Admin key | 请求元数据日志 |
+| POST | `/api/logs/clear` | 本机 + Admin key | 清空请求记录 |
 | GET | `/_admin/config` | Admin key | 脱敏运行配置和统计 |
 | GET | `/_admin/stats` | Admin key | 按池、原因、账号计数 |
 | POST | `/_admin/gray` | Admin key | 原子热更新灰度配置 |
@@ -161,8 +207,19 @@ Windows 注册表，故建议使用独立的灰度账号。
 
 ## 验证范围
 
-`npm test` 使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
+`npm test` 共 **19 项**，使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
 稳定分桶、灰度边界、Header/Cookie 优先级、灰度模型拒绝、鉴权、SSE 分包、
-`[DONE]`、工具调用聚合、池路由、配置脱敏/热更新、401 续期重试。
+`[DONE]`、工具调用聚合、池路由、配置脱敏/热更新、401 续期重试、面板静态资源、
+账号增删、积分查询、密钥保护、日志元数据与远端面板来源限制。
+
+另使用本机 Chromium 150 对合成账号实例做过浏览器验收：登录、25% 灰度热更新、
+账号/模型卡片、添加账号弹窗、深浅主题、移动端 390px 布局均通过，浏览器无 JS 异常。
+截图在 `artifacts/`。这些是合成界面数据，不代表真实小艺额度或模型调用结果。
 
 真实模型、真实积分与 OAuth 需部署者使用自己的账号做上线前验证。
+
+## 参考项目
+
+- 小艺认证协议：[opencode-xiaoyiwork-auth](https://github.com/llf223/opencode-xiaoyiwork-auth)，MIT。
+- 面板与启动方式参考：[workbuddy-gateway](https://github.com/lijieyu233/workbuddy-gateway)，分析版本 `f5d26d5d424fa7565403ff3e959822e008ddce30`。
+- 本面板为独立重写，不依赖参考项目运行，不加载其外部脚本、字体、图片或接口。

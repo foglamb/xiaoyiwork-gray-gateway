@@ -9,4 +9,4 @@ if [[ ! -f config/config.json ]]; then
   echo '已生成 config/config.json；填写密钥和凭据后重试。' >&2
   exit 2
 fi
-exec node src/server.mjs
+exec node src/cli.mjs --open "$@"

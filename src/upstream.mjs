@@ -42,7 +42,7 @@ export function patchChunk(value, modelHint) {
  * Preserve complete SSE blocks (including comments), remove its numeric id lines,
  * normalize OpenAI chunk fields, and terminate exactly once with data: [DONE].
  */
-export function transformSse(upstream, modelHint, { signal, onFrame } = {}) {
+export function transformSse(upstream, modelHint, { signal, onFrame, onUsage } = {}) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
@@ -80,6 +80,7 @@ export function transformSse(upstream, modelHint, { signal, onFrame } = {}) {
       ? `data: ${JSON.stringify(patchChunk(parsed, modelHint))}\n\n`
       : `${lines.join('\n')}\n\n`
     onFrame?.(parsed)
+    if (parsed?.usage) onUsage?.(parsed.usage)
     return text
   }
 
@@ -138,7 +139,7 @@ function findEventBoundary(buffer) {
   return match ? { index: match.index, length: match[0].length } : null
 }
 
-export async function aggregateSse(upstream, modelHint, { signal } = {}) {
+export async function aggregateSse(upstream, modelHint, { signal, onUsage } = {}) {
   const text = await new Response(transformSse(upstream, modelHint, { signal })).text()
   const message = { role: 'assistant', content: '' }
   let reasoning = ''
@@ -159,6 +160,7 @@ export async function aggregateSse(upstream, modelHint, { signal } = {}) {
     created = chunk.created || created
     model = chunk.model || model
     usage = chunk.usage || usage
+    if (chunk.usage) onUsage?.(chunk.usage)
     for (const choice of chunk.choices || []) {
       const delta = choice.delta || {}
       if (typeof delta.content === 'string') message.content += delta.content

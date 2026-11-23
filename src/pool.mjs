@@ -55,11 +55,14 @@ export class AccountPool {
     return task
   }
 
-  async #renew(account) {
-    // accessToken has a short freshness window. Refresh and issue back-to-back;
-    // never cache the intermediate accessToken.
+  #upstreamOrigin() {
     const origin = new URL(this.config.upstreamUrl).origin
-    const base = origin.includes('localhost') || origin.includes('127.0.0.1') ? origin : HAG
+    return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname) ? origin : HAG
+  }
+
+  async #renew(account) {    // accessToken has a short freshness window. Refresh and issue back-to-back;
+    // never cache the intermediate accessToken.
+    const base = this.#upstreamOrigin()
     const refreshedResponse = await this.fetch(`${base}/user-credential/v1/xiaoyiwork/refresh-token`, {
       method: 'POST',
       headers: authHeaders(account, { sse: false }),
@@ -114,7 +117,7 @@ export class AccountPool {
     this.stats.byAccount[account.id] = (this.stats.byAccount[account.id] || 0) + 1
   }
 
-  async chat(body, route, { signal, configPath = this.configPath } = {}) {
+  async chat(body, route, { signal, configPath = this.configPath, onUsage } = {}) {
     const { account, pool } = this.select(route)
     this.configPath = configPath
     this.record(route, account)
@@ -157,11 +160,55 @@ export class AccountPool {
     if (body.stream !== false) {
       headers.set('content-type', 'text/event-stream; charset=utf-8')
       headers.set('x-accel-buffering', 'no')
-      return new Response(transformSse(response.body, body.model, { signal }), { status: 200, headers })
+      return new Response(transformSse(response.body, body.model, { signal, onUsage }), { status: 200, headers })
     }
-    const result = await aggregateSse(response.body, body.model, { signal })
+    const result = await aggregateSse(response.body, body.model, { signal, onUsage })
     headers.set('content-type', 'application/json; charset=utf-8')
     return new Response(JSON.stringify(result), { status: 200, headers })
+  }
+  async quota(account) {
+    const base = this.#upstreamOrigin()
+    const query = (agentId) => this.fetch(`${base}/ability-billing/v1/agent-purchases-client/privilege/query`, {
+      method: 'POST',
+      headers: authHeaders(account, { sse: false }),
+      body: JSON.stringify({
+        accountType: 'HW_UID', agentId,
+        endpoint: {
+          device: { brand: 'HUAWEI', deviceId: account.deviceId }, eduMode: 'NONEDU',
+          foregroundPkgName: '', isXiaoyiAPP: false, language: 'zh_CN',
+          languageMode: 'MANDARIN', locale: 'default',
+        },
+      }),
+      signal: AbortSignal.timeout(30000),
+    })
+    const responses = await Promise.all([query('1'), query('agent208b6760552b4fa0b395e5165d0d771e')])
+    for (let index = 0; index < responses.length; index++) {
+      if (![401, 403].includes(responses[index].status)) continue
+      await responses[index].body?.cancel()
+      if (!account.refreshToken) throw new HttpError(401, `账号 ${account.id} 凭据失效且没有 refreshToken`, 'authentication_error')
+      await this.renew(account)
+      responses[index] = await query(index === 0 ? '1' : 'agent208b6760552b4fa0b395e5165d0d771e')
+    }
+    const [premiumResponse, platformResponse] = responses
+    const premium = await premiumResponse.json().catch(() => ({}))
+    const platform = await platformResponse.json().catch(() => ({}))
+    if (!premiumResponse.ok && !platformResponse.ok) {
+      throw new HttpError(502, `额度查询失败（会员 ${premiumResponse.status} / 权益包 ${platformResponse.status}）`, 'quota_unavailable')
+    }
+    const points = premium.celiaPremiumPrivilege?.aiPoints || {}
+    const windows = []
+    if (typeof points.totalPoints === 'number') {
+      windows.push({ name: premium.celiaPremiumPrivilege?.membership?.skuGroupName || '会员积分', remaining: points.totalPoints, unit: '点' })
+    }
+    for (const privilege of platform.privilegeList || []) {
+      const detail = Array.isArray(privilege.privilegeDetail) ? privilege.privilegeDetail.join(' ') : String(privilege.privilegeDetail || '')
+      const remaining = Number(detail.match(/(\d+(?:\.\d+)?)/)?.[1])
+      windows.push({
+        name: privilege.privilegeName || '权益包', remaining: Number.isFinite(remaining) ? remaining : null, unit: '点',
+        expiresAt: privilege.expireTime || null,
+      })
+    }
+    return { at: Date.now(), plan: premium.celiaPremiumPrivilege?.membership?.skuGroupName || null, windows }
   }
 }
 

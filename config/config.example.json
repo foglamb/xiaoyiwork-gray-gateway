@@ -1,11 +1,12 @@
 {
-  "listen": "0.0.0.0",
+  "listen": "127.0.0.1",
   "port": 17356,
   "upstreamUrl": "https://hag-drcn.op.dbankcloud.com/celia/v1/sse-api/chat/completions",
   "apiKey": "CHANGE_ME_PROXY_KEY",
   "adminKey": "CHANGE_ME_ADMIN_KEY",
   "requestTimeoutMs": 120000,
   "maxBodyBytes": 10485760,
+  "allowPanelFromLan": false,
   "allowGrayModels": false,
   "grayModels": ["Kimi_K3.1_Pro_VE"],
   "gray": {

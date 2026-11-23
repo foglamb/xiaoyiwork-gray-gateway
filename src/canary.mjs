@@ -139,6 +139,7 @@ export function validateConfig(input) {
     if (typeof gray[key] !== 'boolean') throw new HttpError(400, `gray.${key} 必须是布尔值`)
   }
   if (typeof input.allowGrayModels !== 'boolean') throw new HttpError(400, 'allowGrayModels 必须是布尔值')
+  if (input.allowPanelFromLan !== undefined && typeof input.allowPanelFromLan !== 'boolean') throw new HttpError(400, 'allowPanelFromLan 必须是布尔值')
   for (const key of ['allowlist', 'denylist', 'models']) {
     if (!Array.isArray(gray[key]) || gray[key].some((value) => typeof value !== 'string')) {
       throw new HttpError(400, `gray.${key} 必须是字符串数组`)
