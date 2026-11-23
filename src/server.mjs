@@ -5,6 +5,7 @@ import { AccountPool, MODEL_LIST } from './pool.mjs'
 import { GRAY_MODELS, HttpError, apiAuthorized, publicConfig, routeGray, validateConfig } from './canary.mjs'
 import { RequestLog } from './requestlog.mjs'
 import { isLoopbackAddress, lanUrls, panelAuthorized } from './network.mjs'
+import { OAuthManager, OAUTH } from './oauth.mjs'
 
 export const PANEL_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
@@ -60,6 +61,7 @@ export function createProxyServer(config, {
   configPath = null,
   fetchImpl = fetch,
   logger = console,
+  oauthManager = null,
   persistConfig = async (next) => {
     if (!configPath) throw new HttpError(503, '未配置 configPath，运行态更新不会写入磁盘', 'config_persistence_disabled')
     const { writeFile, rename } = await import('node:fs/promises')
@@ -69,8 +71,48 @@ export function createProxyServer(config, {
   },
 } = {}) {
   let runtime = runtimeFrom(config, configPath, fetchImpl, persistConfig)
-  const requestLog = new RequestLog({ configPath, persist: Boolean(configPath) })
+  const requestLog = new RequestLog({ configPath, persist: Boolean(configPath), maxEntries: config.logMaxEntries || 1000 })
   const quotaCache = new Map()
+  const quotaInflight = new Map()
+  const quotaError = new Map()
+  // Token accounting only; no monetary/points estimation is performed here.
+  const spend = { totalTokens: 0, byModel: {}, byRoute: { stable: 0, gray: 0 }, lastAt: null, billed: 0 }
+
+  /** Fetch quota once per account, with a short cache and de-duplicated in-flight calls. */
+  async function refreshQuota(account, { force = false, maxAgeMs = 120000 } = {}) {
+    const cached = quotaCache.get(account.id)
+    if (!force && cached && Date.now() - cached.at < maxAgeMs) return cached
+    if (quotaInflight.has(account.id)) return quotaInflight.get(account.id)
+    const task = runtime.pool.quota(account)
+      .then((quota) => {
+        quotaCache.set(account.id, quota)
+        quotaError.delete(account.id)
+        return quota
+      })
+      .catch((error) => {
+        quotaError.set(account.id, { message: error.message, at: Date.now() })
+        throw error
+      })
+      .finally(() => quotaInflight.delete(account.id))
+    quotaInflight.set(account.id, task)
+    return task
+  }
+
+  /**
+   * Usage only. The gateway never estimates billing: the upstream does not report a
+   * per-request charge, and for some models (e.g. Kimi K3.1 Pro on this account)
+   * there is no deduction at all. Reporting a computed number would be a fabricated fee.
+   */
+  function recordUsage({ model, route, usage }) {
+    const tokens = Number(usage?.total_tokens || 0)
+    spend.totalTokens = (spend.totalTokens || 0) + tokens
+    spend.byModel[model] = (spend.byModel[model] || 0) + tokens
+    spend.byRoute[route] = (spend.byRoute[route] || 0) + tokens
+    spend.lastAt = Date.now()
+    return tokens
+  }
+
+  const oauth = oauthManager || new OAuthManager({ fetchImpl, logger, listen: config.listen === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1' })
   let panelHtml
   let panelJs
   let panelCss
@@ -88,6 +130,19 @@ export function createProxyServer(config, {
     updateChain = update.catch(() => {})
     await update
     installRuntime(candidate)
+  }
+
+  async function addAccount(input) {
+    if (!['stable', 'gray'].includes(input.pool)) throw new HttpError(400, 'pool 必须为 stable 或 gray')
+    const account = normalizeAccountInput(input)
+    const candidate = structuredClone(runtime.config)
+    if (candidate.accounts[input.pool].some((item) => item.id === account.id)) throw new HttpError(409, `账号 ${account.id} 已存在`, 'account_exists')
+    const sameUid = [...candidate.accounts.stable, ...candidate.accounts.gray].find((item) => item.uid === account.uid)
+    if (sameUid && input.allowDuplicate !== true) throw new HttpError(409, `UID ${account.uid} 已配置为 ${sameUid.id}；同一 uid 续期会使旧凭据失效，如确认并存请设置 allowDuplicate`, 'duplicate_uid')
+    candidate.accounts[input.pool].push(account)
+    validateConfig(candidate)
+    await persistRuntimeConfig(candidate)
+    return { id: account.id, uid: account.uid, pool: input.pool, hasRefreshToken: Boolean(account.refreshToken), source: account.source || 'manual' }
   }
 
   async function handle(request, response) {
@@ -142,12 +197,27 @@ export function createProxyServer(config, {
         validTimeSec: account.validTimeSec || null,
         requests: runtime.pool.stats.byAccount[account.id] || 0,
         quota: quotaCache.get(account.id) || null,
+        quotaError: quotaError.get(account.id)?.message || null,
+        source: account.source || 'manual',
+        displayName: account.displayName || null,
       })))
+      // Refresh quota for accounts that have never been queried or are stale, without blocking the panel.
+      for (const account of [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]) {
+        const cached = quotaCache.get(account.id)
+        if (!cached || Date.now() - cached.at > 120000) refreshQuota(account).catch(() => {})
+      }
+      const requestHost = String(request.headers.host || `127.0.0.1:${runtime.config.port}`)
+      const validHost = /^[A-Za-z0-9.\-:[\]]+$/.test(requestHost) ? requestHost : `127.0.0.1:${runtime.config.port}`
       sendJson(response, 200, {
         service: { name: '小艺Work 灰度网关', version: '2.0.0', listen: runtime.config.listen, port: runtime.config.port, startedAt: runtime.pool.stats.startedAt },
-        endpoint: { baseUrl: `http://127.0.0.1:${runtime.config.port}/v1`, lanUrls: lanUrls(runtime.config.port) },
+        endpoint: { baseUrl: `http://127.0.0.1:${runtime.config.port}/v1`, lanUrls: lanUrls(runtime.config.port), currentUrl: `http://${validHost}/v1` },
         gray: configView.gray, allowGrayModels: configView.allowGrayModels, grayModels: runtime.config.grayModels,
-        accounts, stats: runtime.pool.stats, logStats: requestLog.stats(),
+        accounts, stats: runtime.pool.stats, logStats: requestLog.stats(), spend,
+        quota: {
+          points: [...quotaCache.values()].reduce((sum, item) => sum + (item.windows || []).reduce((n, w) => n + (typeof w.remaining === 'number' ? w.remaining : 0), 0), 0),
+          accounts: quotaCache.size,
+          totalAccounts: runtime.config.accounts.stable.length + runtime.config.accounts.gray.length,
+        },
         models: MODEL_LIST.map(([id, name]) => ({ id, name, gray: GRAY_MODELS.has(id) || runtime.config.grayModels.includes(id), rate: modelRate(id), vision: modelVision(id) })),
         requestTimeoutMs: runtime.config.requestTimeoutMs,
       })
@@ -167,15 +237,55 @@ export function createProxyServer(config, {
       sendJson(response, 200, { apiKey: runtime.config.apiKey, adminKey: runtime.config.adminKey })
       return
     }
+    if (request.method === 'POST' && url.pathname === '/api/auth/oauth/start') {
+      const input = await readJsonBody(request, 16384)
+      const session = oauth.begin(input)
+      const callbackListening = await oauth.startCallbackServer()
+      logger.log(`[oauth] started pool=${session.pool}; automaticCallback=${callbackListening}`)
+      sendJson(response, 200, { ...oauth.status(session.state), url: session.url, redirectUri: OAUTH.redirectUri, callbackListening, platform: process.platform })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/api/auth/oauth/status') {
+      const state = url.searchParams.get('state') || ''
+      const status = oauth.status(state)
+      if (status.status === 'success') {
+        const session = oauth.consume(state)
+        try {
+          const account = await addAccount({ ...session.account, pool: session.pool })
+          sendJson(response, 200, { ...status, account })
+        } catch (error) {
+          session.status = 'failed'
+          session.error = error.message
+          throw error
+        }
+      } else sendJson(response, 200, status)
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/auth/oauth/complete') {
+      const input = await readJsonBody(request, 64 * 1024)
+      const callbackUrl = parseOauthCallback(input.callbackUrl)
+      if (callbackUrl.searchParams.get('state') !== input.state) throw new HttpError(400, '回调网址与当前登录流程不匹配，请复制本次登录的网址', 'oauth_state_mismatch')
+      await oauth.receiveCallback(callbackUrl)
+      sendJson(response, 200, { ...oauth.status(input.state), message: '华为授权已完成，正在添加账号' })
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/auth/oauth/cancel') {
+      const input = await readJsonBody(request, 16384)
+      oauth.cancel(input.state)
+      sendJson(response, 200, { ok: true })
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/auth/import') {
+      const input = await readJsonBody(request, 256 * 1024)
+      const imported = importAccount(input.text)
+      const account = await addAccount({ ...imported, pool: input.pool, label: input.label, source: 'import' })
+      sendJson(response, 201, { ok: true, account })
+      return
+    }
     if (request.method === 'POST' && url.pathname === '/api/accounts') {
       const input = await readJsonBody(request, 256 * 1024)
       if (!['stable', 'gray'].includes(input.pool)) throw new HttpError(400, 'pool 必须为 stable 或 gray')
-      const account = normalizeAccountInput(input)
-      const candidate = structuredClone(runtime.config)
-      if (candidate.accounts[input.pool].some((item) => item.id === account.id)) throw new HttpError(409, `账号 ${account.id} 已存在`, 'account_exists')
-      candidate.accounts[input.pool].push(account)
-      validateConfig(candidate)
-      await persistRuntimeConfig(candidate)
+      const account = await addAccount(input)
       sendJson(response, 201, { ok: true, id: account.id, pool: input.pool })
       return
     }
@@ -184,7 +294,10 @@ export function createProxyServer(config, {
       const candidate = structuredClone(runtime.config)
       const pool = Object.keys(candidate.accounts).find((key) => candidate.accounts[key].some((account) => account.id === id))
       if (!pool) throw new HttpError(404, '账号不存在', 'account_not_found')
-      if (candidate.accounts[pool].length === 1) throw new HttpError(409, `${pool} 池至少保留一个账号；请先添加替代账号`, 'last_account')
+      if (candidate.accounts[pool].length === 1) {
+        const input = await readJsonBody(request, 1024)
+        if (input.force !== true) throw new HttpError(409, '这是当前唯一账号。停用后反代将没有可用账号；确认后可在删除请求传 force=true', 'last_account')
+      }
       candidate.accounts[pool] = candidate.accounts[pool].filter((account) => account.id !== id)
       await persistRuntimeConfig(candidate)
       quotaCache.delete(id)
@@ -197,11 +310,28 @@ export function createProxyServer(config, {
       if (!account) throw new HttpError(404, '账号不存在', 'account_not_found')
       const quota = await runtime.pool.quota(account)
       quotaCache.set(id, quota)
+      quotaError.delete(id)
+      quotaInflight.delete(id)
       sendJson(response, 200, { ok: true, quota })
       return
     }
+    if (request.method === 'GET' && url.pathname === '/api/quota/refresh') {
+      const results = []
+      for (const account of [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]) {
+        try {
+          const quota = await refreshQuota(account, { force: true })
+          results.push({ id: account.id, ok: true, windows: quota.windows.length })
+        } catch (error) {
+          results.push({ id: account.id, ok: false, error: error.message })
+        }
+      }
+      sendJson(response, 200, { ok: true, results, spend, points: [...quotaCache.values()].reduce((sum, item) => sum + (item.windows || []).reduce((n, w) => n + (typeof w.remaining === 'number' ? w.remaining : 0), 0), 0) })
+      return
+    }
     if (request.method === 'GET' && url.pathname === '/api/logs') {
-      sendJson(response, 200, { entries: requestLog.recent(url.searchParams.get('limit')), stats: requestLog.stats() })
+      const page = requestLog.page({ page: url.searchParams.get('page'), pageSize: url.searchParams.get('pageSize') })
+      const hours = url.searchParams.get('hours')
+      sendJson(response, 200, { ...page, stats: requestLog.stats(), breakdown: requestLog.breakdown(hours) })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/logs/clear') {
@@ -288,7 +418,8 @@ export function createProxyServer(config, {
           }
         }
         response.end()
-        requestLog.finish(requestId, { status: upstreamResponse.status, accountId, usage })
+        recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
+        requestLog.finish(requestId, { status: upstreamResponse.status, accountId, usage, rate: modelRate(body.model) })
       } catch (error) {
         requestLog.finish(requestId, { status: error.status || (controller.signal.aborted ? 499 : 500), error: controller.signal.aborted && !response.writableEnded ? '客户端断开' : error.message })
         throw error
@@ -346,19 +477,61 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 
 function normalizeAccountInput(input) {
-  const id = String(input.id || '').trim()
+  const uid = String(input.uid || '').trim()
+  const credential = String(input.credential || '').trim()
+  const deviceId = String(input.deviceId || '').trim()
+  if (!/^\d{6,32}$/.test(uid)) throw new HttpError(400, 'UID 必须是 6–32 位数字（华为账号 uid）', 'invalid_account')
+  if (credential.length < 8 || credential.length > 8192) throw new HttpError(400, 'businessCredential 长度无效', 'invalid_account')
+  if (!/^[A-Za-z0-9_.:-]{8,512}$/.test(deviceId)) throw new HttpError(400, 'Device ID 格式无效：需要小艺Work 已登记设备的 ID', 'invalid_account')
+  const id = String(input.id || `account-${uid.slice(-6)}`).trim()
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id)) throw new HttpError(400, '账号 id 需为 1–64 位字母、数字、点、下划线或横线', 'invalid_account')
-  const account = {
-    id,
-    credential: String(input.credential || '').trim(),
-    uid: String(input.uid || '').trim(),
-    deviceId: String(input.deviceId || '').trim(),
-  }
+  const account = { id, credential, uid, deviceId }
   if (input.refreshToken) account.refreshToken = String(input.refreshToken).trim()
   if (input.validTimeSec !== undefined && input.validTimeSec !== null && input.validTimeSec !== '') {
     account.validTimeSec = Number(input.validTimeSec)
   }
+  if (input.source === 'oauth' || input.source === 'import') account.source = input.source
+  if (input.displayName) account.displayName = String(input.displayName).slice(0, 64)
   return account
+}
+
+/** Parse a pasted OAuth callback URL. Only the fixed loopback callback is accepted. */
+function parseOauthCallback(raw) {
+  let url
+  try { url = new URL(String(raw || '').trim()) } catch {
+    throw new HttpError(400, '请粘贴完整回调网址（以 http://127.0.0.1:17355/auth/callback 开头）', 'oauth_callback_invalid')
+  }
+  if (url.origin !== 'http://127.0.0.1:17355' || url.pathname !== '/auth/callback') {
+    throw new HttpError(400, '回调地址必须是 http://127.0.0.1:17355/auth/callback', 'oauth_callback_invalid')
+  }
+  if (url.searchParams.get('error')) {
+    throw new HttpError(400, `华为授权被拒绝：${url.searchParams.get('error')}`, 'oauth_denied')
+  }
+  const code = url.searchParams.get('code') || ''
+  if (!code) throw new HttpError(400, '回调网址里没有 code，请重新登录', 'oauth_callback_invalid')
+  return url
+}
+
+/**
+ * Import an existing XiaoyiWork login state. Accepts the magpie plugin-auth value,
+ * the gateway's own account JSON, or a plain credential string.
+ */
+function importAccount(text) {
+  const raw = String(text || '').trim()
+  if (!raw) throw new HttpError(400, '请粘贴登录态 JSON 或凭据', 'invalid_import')
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    let parsed
+    try { parsed = JSON.parse(raw) } catch { throw new HttpError(400, '登录态 JSON 无法解析', 'invalid_import') }
+    const item = Array.isArray(parsed) ? parsed[0] : parsed
+    const credential = item?.credential || item?.businessCredential || item?.key || item?.access
+    const uid = item?.uid || item?.accountId || item?.metadata?.uid
+    const deviceId = item?.deviceId || item?.metadata?.deviceId
+    const refreshToken = item?.refreshToken || item?.refresh || item?.metadata?.refreshToken
+    if (!credential || !uid) throw new HttpError(400, '登录态缺少 credential 或 uid；请确认是从自己的小艺Work/magpie 配置导出', 'invalid_import')
+    if (!deviceId) throw new HttpError(400, '登录态缺少 deviceId：小艺上游要求已登记设备，请一并在导出内容里提供', 'invalid_import')
+    return { credential, uid, deviceId, refreshToken, validTimeSec: item.validTimeSec || item.expires || undefined }
+  }
+  throw new HttpError(400, '只接受 JSON 登录态；不支持手工填接口凭据', 'invalid_import')
 }
 
 function modelRate(id) {

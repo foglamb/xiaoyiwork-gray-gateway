@@ -28,8 +28,10 @@ export class AccountPool {
   }
 
   select(route) {
-    const pool = this.config.accounts[route.pool]?.length ? route.pool : 'stable'
-    const accounts = this.config.accounts[pool]
+    const selected = this.config.accounts[route.pool]
+    if (!selected?.length) throw new HttpError(503, `${route.pool} 池暂无账号，请在管理面板「账号池」中添加小艺Work 凭据`, 'account_pool_empty')
+    const pool = route.pool
+    const accounts = selected
     const index = this.cursors[pool]++ % accounts.length
     this.cursors[pool] %= accounts.length
     return { account: accounts[index], pool }

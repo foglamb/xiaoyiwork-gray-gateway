@@ -56,6 +56,10 @@ node src/cli.mjs --help
 `uid`、`deviceId` 和 `refreshToken`。建议 stable/gray 使用独立账号：原项目指出
 签新票会让同账号旧票失效，本服务不会回写小艺Work 的 Windows 注册表。
 
+支持空账号池启动，便于先在「账号池」页录入真实凭据；在开始转发前，stable/gray
+两个池都应至少添加一个账号。空池请求返回 `503 account_pool_empty`，不会发送假凭据到上游。
+删除池内最后一个账号前，接口会要求明确确认。
+
 `config/config.json` 被 `.gitignore` 排除，建议权限 `0600`。默认仅监听
 `127.0.0.1`。如果改用 `--lan`，API 会监听局域网；面板接口仍按真实来源 IP 限制本机，
 不采信 `X-Forwarded-For`。只有确有需要才在配置中设置 `allowPanelFromLan: true`，

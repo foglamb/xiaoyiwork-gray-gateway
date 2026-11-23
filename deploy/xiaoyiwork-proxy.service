@@ -1,0 +1,24 @@
+[Unit]
+Description=XiaoyiWork OpenAI-compatible canary gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=Harness
+Group=Harness
+WorkingDirectory=/vol2/@appshare/Harness/.local/share/xiaoyiwork-gray-proxy
+Environment=HOME=/vol2/@appshare/Harness
+Environment=XIAOYI_PROXY_CONFIG=/vol2/@appshare/Harness/.config/xiaoyiwork-gray-proxy/config.json
+ExecStart=/var/apps/nodejs_v24/target/bin/node /vol2/@appshare/Harness/.local/share/xiaoyiwork-gray-proxy/src/cli.mjs --lan
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/vol2/@appshare/Harness/.config/xiaoyiwork-gray-proxy
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

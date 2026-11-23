@@ -6,15 +6,17 @@ export function isLoopbackAddress(address = '') {
 }
 
 export function lanUrls(port) {
-  const addresses = new Set()
-  for (const entries of Object.values(networkInterfaces())) {
+  const addresses = []
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    // Container bridges/veth addresses are not reachable from ordinary LAN clients.
+    if (/^(docker|br-|veth|virbr|cni|flannel|kube|lxc)/i.test(name)) continue
     for (const entry of entries || []) {
       const address = entry.address
       if (entry.internal || entry.family !== 'IPv4' || !isPrivateIpv4(address)) continue
-      addresses.add(`http://${address}:${port}/v1`)
+      addresses.push(`http://${address}:${port}/v1`)
     }
   }
-  return [...addresses]
+  return [...new Set(addresses)]
 }
 
 function isPrivateIpv4(address) {

@@ -155,7 +155,7 @@ export function validateConfig(input) {
   if (!Number.isInteger(input.maxBodyBytes) || input.maxBodyBytes < 1024) throw new HttpError(400, 'maxBodyBytes 无效')
   if (!Number.isFinite(input.requestTimeoutMs) || input.requestTimeoutMs < 1000) throw new HttpError(400, 'requestTimeoutMs 无效')
   for (const pool of ['stable', 'gray']) {
-    if (!Array.isArray(input.accounts?.[pool]) || !input.accounts[pool].length) throw new HttpError(400, `accounts.${pool} 至少需要一个账号`)
+    if (!Array.isArray(input.accounts?.[pool])) throw new HttpError(400, `accounts.${pool} 必须是数组`)
     for (const account of input.accounts[pool]) {
       if (!account.id || !account.credential || !account.uid || !account.deviceId) {
         throw new HttpError(400, `accounts.${pool} 每项需要 id/credential/uid/deviceId`)

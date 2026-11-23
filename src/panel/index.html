@@ -42,10 +42,10 @@
             <div class="traffic-stat"><span>累计请求</span><strong id="stat-requests">—</strong><small>本次服务启动以来</small></div>
             <div class="traffic-stat stable"><span>稳定流量</span><strong id="stat-stable">—</strong><small id="stable-percent">—</small></div>
             <div class="traffic-stat gray"><span>灰度流量</span><strong id="stat-gray">—</strong><small id="gray-percent">—</small></div>
-            <div class="traffic-stat"><span>24h 成功率</span><strong id="stat-success">—</strong><small id="stat-latency">平均耗时 —</small></div>
+            <div class="traffic-stat credit"><span>24h Token</span><strong id="stat-points">—</strong><small id="stat-spend">缓存命中 —</small></div>
           </div>
           <div class="traffic-bar" aria-label="稳定与灰度流量分布"><span id="bar-stable"></span><span id="bar-gray"></span></div>
-          <div class="traffic-legend"><span><i class="dot stable"></i>稳定池 <b id="legend-stable">—</b></span><span><i class="dot gray"></i>灰度池 <b id="legend-gray">—</b></span><span class="grow"></span><span id="pool-target">路由至 gray 池</span></div>
+          <div class="traffic-legend"><span><i class="dot stable"></i>稳定池 <b id="legend-stable">—</b></span><span><i class="dot gray"></i>灰度池 <b id="legend-gray">—</b></span><span class="grow"></span><span>成功率 <b id="stat-success">—</b> · 平均耗时 <b id="stat-latency">—</b></span></div>
         </div>
 
         <div class="overview-grid">
@@ -71,19 +71,19 @@
         </div>
 
         <div class="connect-card">
-          <div class="connect-field"><label>OpenAI Base URL <span class="badge mute">客户端接入</span></label><div class="connect-value"><code id="base-url">—</code><button class="copy" data-copy="base-url" title="复制 Base URL">⧉</button></div></div>
+          <div class="connect-field"><label>OpenAI Base URL <span class="badge mute">客户端接入</span><span class="grow"></span><span class="address-tabs"><button class="active" data-address="local" type="button">本机</button><button data-address="lan" type="button">局域网</button></span></label><div class="connect-value"><code id="base-url">—</code><button class="copy" data-copy="base-url" title="复制 Base URL">⧉</button></div></div>
           <div class="connect-field"><label>API Key <span class="muted tiny">仅客户端鉴权</span></label><div class="connect-value"><code id="api-key" class="masked">••••••••••••••••</code><button class="copy" id="reveal-key" title="显示或隐藏 API Key">◉</button><button class="copy" data-copy="api-key" title="复制 API Key">⧉</button></div></div>
-          <div class="connect-meta"><span><i class="dot green"></i><b id="healthy-accounts">0</b> 个账号已配置</span><span>·</span><span id="model-summary">—</span><span>·</span><span>API v1</span></div>
+          <div class="connect-meta"><span><i class="dot green"></i><b id="healthy-accounts">0</b> 个账号已配置</span><span>·</span><span id="quota-summary">积分 —</span><span>·</span><span id="spend-summary">24h Token —</span><span>·</span><span id="model-summary">—</span></div>
         </div>
       </section>
 
       <section class="view" data-view="accounts">
-        <div class="section-title"><div><h2>账号池</h2><p>稳定与灰度流量分开管理，凭据仅保存在本网关。</p></div><button class="primary" id="add-account">＋ 添加账号</button></div>
+        <div class="section-title"><div><h2>账号池</h2><p>稳定与灰度流量分开管理；账号通过华为账号登录授权，凭据仅保存在本网关。</p></div><button class="primary" id="add-account">＋ 添加账号</button></div>
         <div class="pool-columns">
           <section><div class="pool-heading"><span class="pool-icon stable">S</span><div><h3>稳定池</h3><span>承载常规生产流量</span></div><span class="count" id="stable-count">0</span></div><div class="grid" id="stable-accounts"></div></section>
           <section><div class="pool-heading"><span class="pool-icon gray">G</span><div><h3>灰度池</h3><span>承接灰度用户与灰度模型</span></div><span class="count" id="gray-count">0</span></div><div class="grid" id="gray-accounts"></div></section>
         </div>
-        <p class="footnote">额度来自上游真实查询，未查询显示“—”。同账号签新凭据会使旧凭据失效，建议使用独立的灰度账号。</p>
+        <p class="footnote">额度来自上游真实查询，未查询显示“—”。同账号签新凭据会使旧凭据失效，建议使用独立的灰度账号。先在两个池各添加至少一个账号，再开始转发请求。</p>
       </section>
 
       <section class="view" data-view="models">
@@ -95,8 +95,50 @@
 
       <section class="view" data-view="logs">
         <div class="section-title"><div><h2>请求记录</h2><p>只记录请求元数据，不记录消息内容或凭据。</p></div><button id="clear-logs">清空记录</button></div>
-        <div class="log-metrics"><div><span>最近 24 小时</span><b id="log-total">0</b></div><div><span>失败</span><b id="log-failed">0</b></div><div><span>总 Token</span><b id="log-tokens">—</b></div><div><span>平均耗时</span><b id="log-average">—</b></div></div>
-        <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>流量池</th><th>账号</th><th>结果</th><th>耗时</th><th>Token</th></tr></thead><tbody id="logs-body"><tr><td colspan="7" class="empty">暂无请求记录</td></tr></tbody></table></div>
+        <div class="metric-strip">
+          <div class="metric"><span>请求</span><b id="log-total">0</b></div>
+          <div class="metric"><span>失败</span><b id="log-failed">0</b></div>
+          <div class="metric"><span>缓存命中率</span><b id="log-cache">—</b></div>
+          <div class="metric"><span>总 Token</span><b id="log-tokens">—</b></div>
+          <div class="metric"><span>推理 Token</span><b id="log-reasoning">—</b></div>
+          <div class="metric"><span>平均耗时</span><b id="log-average">—</b></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="card-heading"><div><span class="section-kicker">TOKEN & CACHE</span><h3>Token 用量趋势</h3></div><span class="muted small" id="cache-hint">—</span></div>
+          <div class="chart-toolbar">
+            <div class="seg" id="chart-metric">
+              <button data-metric="tokens" class="sel">Token</button>
+              <button data-metric="cacheRate">缓存命中率</button>
+              <button data-metric="requests">请求数</button>
+            </div>
+            <span class="grow"></span>
+            <div class="seg" id="chart-range">
+              <button data-hours="6">6h</button>
+              <button data-hours="24" class="sel">24h</button>
+              <button data-hours="72">72h</button>
+            </div>
+          </div>
+          <div class="chart-legend" id="chart-legend"></div>
+          <div class="chart-wrap" id="token-chart"><div class="empty">暂无数据</div></div>
+          <div class="chart-tip" id="chart-tip" hidden></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="card-heading"><div><span class="section-kicker">PER MODEL</span><h3>模型消耗明细</h3></div><span class="muted small">近 24 小时</span></div>
+          <div class="table-wrap"><table><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>缓存命中</th><th>命中率</th><th>输出</th><th>推理</th><th>推理占比</th><th>平均耗时</th></tr></thead><tbody id="model-stats-body"><tr><td colspan="9" class="empty">暂无数据</td></tr></tbody></table></div>
+        </div>
+
+        <div class="toolbar log-toolbar">
+          <span class="muted small" id="log-page-info">—</span>
+          <span class="grow"></span>
+          <label class="switch"><input id="auto-refresh" type="checkbox" checked><span></span><b>自动刷新</b></label>
+          <button class="sm" id="log-prev">上一页</button>
+          <button class="sm" id="log-next">下一页</button>
+          <button class="sm" id="log-latest">回到最新</button>
+        </div>
+        <div class="table-wrap log-table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>流量池</th><th>账号</th><th>结果</th><th>耗时</th><th>输入</th><th>缓存</th><th>命中率</th><th>输出</th><th>推理</th><th>合计</th></tr></thead><tbody id="logs-body"><tr><td colspan="12" class="empty">暂无请求记录</td></tr></tbody></table></div>
+        <p class="footnote">日志分页加载，每页 50 条，服务端最多保留 <span id="log-cap">—</span> 条。缓存命中率来自上游 usage.prompt_tokens_details.cached_tokens。</p>
       </section>
 
       <section class="view" data-view="settings">
@@ -116,7 +158,35 @@
 
   <dialog id="auth-dialog" class="auth-dialog"><div class="brand-mark">艺</div><h2>进入管理面板</h2><p>输入配置文件中的管理密钥。仅当前浏览器会话保存，不会写入 localStorage。</p><form id="auth-form"><label class="form-label" for="admin-key-input">Admin Key</label><input id="admin-key-input" type="password" autocomplete="current-password" autofocus required><button class="primary full" type="submit">验证并进入</button></form><div class="form-error" id="auth-error"></div></dialog>
 
-  <dialog id="account-dialog"><form id="account-form"><h2>添加账号</h2><p>从你自己的小艺Work / magpie 登录配置中复制以下凭据。</p><div class="form-grid"><div><label class="form-label" for="account-pool">账号池</label><select id="account-pool" required><option value="stable">稳定池</option><option value="gray">灰度池</option></select></div><div><label class="form-label" for="account-id">账号标识</label><input id="account-id" placeholder="例如 stable-2" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" required></div><div class="span-2"><label class="form-label" for="account-credential">businessCredential</label><input id="account-credential" type="password" autocomplete="off" required></div><div><label class="form-label" for="account-uid">UID</label><input id="account-uid" required></div><div><label class="form-label" for="account-device">Device ID</label><input id="account-device" required></div><div class="span-2"><label class="form-label" for="account-refresh">refreshToken <span class="muted">（可选，用于自动续期）</span></label><input id="account-refresh" type="password" autocomplete="off"></div></div><div class="dialog-actions"><button type="button" id="cancel-account">取消</button><button class="primary" type="submit">保存账号</button></div></form></dialog>
+  <dialog id="account-dialog"><div id="account-login-step">
+    <h2>添加小艺账号</h2>
+    <p>用<strong>华为账号浏览器登录</strong>授权。网关按标准 OAuth PKCE 完成授权，自动签发小艺凭据，不需要填写接口授权码。</p>
+    <div class="login-choice">
+      <label class="form-label" for="account-pool">加入账号池</label>
+      <select id="account-pool" required><option value="stable">稳定池（常规流量）</option><option value="gray">灰度池（灰度用户与灰度模型）</option></select>
+    </div>
+    <button class="primary full" id="start-oauth" type="button">使用华为账号登录</button>
+    <div class="login-status" id="oauth-status" hidden>
+      <div class="login-step" id="oauth-step-text">等待在华为页面完成授权…</div>
+      <div class="login-actions">
+        <a class="link-button" id="oauth-open-link" href="#" target="_blank" rel="noopener noreferrer">在新窗口打开华为登录页</a>
+        <button class="link" id="copy-oauth-url" type="button">复制登录链接</button>
+        <button class="link" id="cancel-oauth" type="button">取消</button>
+      </div>
+      <div class="fallback" id="oauth-fallback" hidden>
+        <p class="footnote">如果浏览器停在 <code>127.0.0.1:17355</code> 的空白页或打不开，说明回调地址在远程设备上。复制地址栏整段网址，粘贴到这里完成登录：</p>
+        <input id="oauth-callback-url" placeholder="http://127.0.0.1:17355/auth/callback?code=…&state=…">
+        <button class="primary full" id="submit-callback" type="button">用此回调完成登录</button>
+      </div>
+    </div>
+    <details class="advanced">
+      <summary>已有登录态？改为直接导入</summary>
+      <p class="footnote">从你自己的 magpie / OpenCode 小艺插件配置里复制账号 JSON（含 credential、uid、deviceId）。<strong>不要填别人分享的凭据。</strong></p>
+      <textarea id="import-text" rows="6" placeholder='{"credential":"…","uid":"…","deviceId":"…","refreshToken":"…"}'></textarea>
+      <button class="sm" id="import-account" type="button">导入到所选账号池</button>
+    </details>
+    <div class="dialog-actions"><button type="button" id="cancel-account">关闭</button></div>
+  </div></dialog>
 
   <div class="toast" id="toast" role="status"></div>
   <script src="/panel.js" type="module"></script>

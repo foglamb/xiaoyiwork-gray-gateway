@@ -85,13 +85,13 @@ test('account add/delete persists credentials server-side and prevents empty poo
   const headers = jsonHeaders({ 'x-admin-key': config.adminKey })
   const added = await fetch(`${base}/api/accounts`, {
     method: 'POST', headers,
-    body: JSON.stringify({ pool: 'gray', id: 'gray-B', credential: 'second-credential', uid: '10003', deviceId: 'second-device', refreshToken: 'second-refresh' }),
+    body: JSON.stringify({ pool: 'gray', id: 'gray-B', credential: 'second-credential-value', uid: '100003', deviceId: 'second-device_100003', refreshToken: 'second-refresh' }),
   })
   assert.equal(added.status, 201)
   const stored = JSON.parse(await readFile(configPath, 'utf8'))
   assert.equal(stored.accounts.gray.length, 2)
-  assert.equal(stored.accounts.gray[1].credential, 'second-credential')
-  const duplicate = await fetch(`${base}/api/accounts`, { method: 'POST', headers, body: JSON.stringify({ pool: 'gray', id: 'gray-B', credential: 'x', uid: 'u', deviceId: 'd' }) })
+  assert.equal(stored.accounts.gray[1].credential, 'second-credential-value')
+  const duplicate = await fetch(`${base}/api/accounts`, { method: 'POST', headers, body: JSON.stringify({ pool: 'gray', id: 'gray-B', credential: 'another-credential', uid: '100004', deviceId: 'device_100004' }) })
   assert.equal(duplicate.status, 409)
   const removed = await fetch(`${base}/api/accounts/gray-B`, { method: 'DELETE', headers })
   assert.equal(removed.status, 200)
