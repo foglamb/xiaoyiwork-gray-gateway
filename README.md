@@ -44,11 +44,27 @@ node src/cli.mjs --help
 | 页面 | 已实现功能 |
 |---|---|
 | 灰度控制台 | 启用/停用、0–100% 滑块、1/5/10/25/100% 快捷档、一键回滚、稳定/灰度请求分布 |
-| 账号池 | 稳定/灰度分栏、添加、删除、自动续期状态、请求数、手动查询会员积分与权益包 |
+| 账号池 | 稳定/灰度分栏、**华为账号 OAuth 登录**、登录态导入、删除、自动续期、积分自动查询 |
 | 模型 | 模型卡片、ID 复制、倍率/视觉能力、灰度模型启停确认 |
-| 请求记录 | 路由池、账号、结果、耗时、Token；清空日志 |
+| 请求记录 | Token 趋势**折线图**（时间轴/指标切换/6h-24h-72h）、缓存命中率、模型明细表、分页日志 |
 | 设置 | API/Admin 密钥轮换、超时、Header/Cookie 灰度开关、客户端配置复制 |
 | 通用 | 深色/浅色主题、移动端布局、管理密钥仅保存于 sessionStorage |
+
+### 华为账号登录（不走接口授权码）
+
+「账号池 → 添加账号」使用**华为账号 OAuth 2.0 + PKCE** 授权：
+
+1. 面板生成 `state` + `code_verifier`，跳转华为授权页（`code_challenge_method=S256`）；
+2. 回调固定为 `http://127.0.0.1:17355/auth/callback`，网关校验 `state` 后换取 token；
+3. 用 access token 调用小艺 `business-credential/create` 签发凭据，按 UID 自动入池；
+4. 网关默认在 17355 端口监听回调。
+
+网关部署在 NAS/服务器时，远端浏览器打开 `127.0.0.1:17355` 会连不上，这是预期行为：
+把地址栏那整条回调网址复制到面板输入框即可完成登录，`state` 仍由服务端校验。
+
+- 同一 UID 不能同时在稳定池和灰度池：签新票会使旧票失效，两边共存会互相顶掉。
+- 设备需已在小艺Work 登记；否则签票接口会拒绝，此时可改用「已有登录态导入」。
+- 导入仅接受 JSON（`credential` / `uid` / `deviceId`），不接受手工粘贴 token。
 
 白名单、黑名单、分桶 salt 等高级灰度字段仍通过 `/_admin/gray` 或配置文件维护。
 
@@ -74,6 +90,21 @@ curl http://127.0.0.1:17356/healthz
 
 Compose 默认只映射 `127.0.0.1:17356`。配置目录挂载可写，用于原子保存灰度设置、
 续期凭据与请求元数据。
+
+## Token 用量与缓存
+
+请求记录只保存元数据，不保存对话内容：
+
+- 输入 / 输出 / 合计 Token，来自上游 `usage`；
+- 缓存命中来自 `usage.prompt_tokens_details.cached_tokens`，命中率 = 命中 / 输入；
+- 推理 Token 来自 `usage.completion_tokens_details.reasoning_tokens`；
+- 图表为 SVG 折线图，横轴时间、纵轴 Token，服务端按数据密度自动选择 5 分钟/15 分钟/1 小时分桶，
+  并把窗口聚焦到有流量的时段；稀疏时只连真实采样点，不伪造空白区间；
+- 日志**分页**：每页 50 条（服务端上限 100），内存与磁盘保留上限 `logMaxEntries`（默认 1000，钳制 50–5000）；
+- 自动刷新 15 秒，可关闭，页面隐藏时停止，数据未变化不重绘表格。
+
+**不做计费估算。** 网关只报告上游接口返回的余额原值，不按 Token×倍率推算扣费：
+部分模型（如本机测试的 Kimi K3.1 Pro）根本不扣积分，推算出来的数字会是虚构费用。
 
 ## 灰度语义
 
@@ -182,8 +213,14 @@ print(answer.choices[0].message.content)
 | GET/POST | `/api/keys` | 本机 + Admin key | 查看/轮换访问密钥 |
 | POST/DELETE | `/api/accounts`、`/api/accounts/:id` | 本机 + Admin key | 添加/删除账号 |
 | POST | `/api/accounts/:id/quota` | 本机 + Admin key | 查询积分与权益包 |
-| GET | `/api/logs` | 本机 + Admin key | 请求元数据日志 |
+| GET | `/api/logs` | 本机 + Admin key | 分页请求日志 + 统计 + 图表聚合 |
 | POST | `/api/logs/clear` | 本机 + Admin key | 清空请求记录 |
+| POST | `/api/auth/oauth/start` | 本机 + Admin key | 发起华为账号 OAuth 登录 |
+| GET | `/api/auth/oauth/status` | 本机 + Admin key | 轮询登录状态并在成功后入池 |
+| POST | `/api/auth/oauth/complete` | 本机 + Admin key | 用复制的回调网址完成登录 |
+| POST | `/api/auth/oauth/cancel` | 本机 + Admin key | 取消登录流程 |
+| POST | `/api/auth/import` | 本机 + Admin key | 导入已有登录态 JSON |
+| POST | `/api/quota/refresh` | 本机 + Admin key | 刷新全部账号余额 |
 | GET | `/_admin/config` | Admin key | 脱敏运行配置和统计 |
 | GET | `/_admin/stats` | Admin key | 按池、原因、账号计数 |
 | POST | `/_admin/gray` | Admin key | 原子热更新灰度配置 |
@@ -211,10 +248,12 @@ Windows 注册表，故建议使用独立的灰度账号。
 
 ## 验证范围
 
-`npm test` 共 **19 项**，使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
+`npm test` 共 **34 项**，使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
 稳定分桶、灰度边界、Header/Cookie 优先级、灰度模型拒绝、鉴权、SSE 分包、
 `[DONE]`、工具调用聚合、池路由、配置脱敏/热更新、401 续期重试、面板静态资源、
-账号增删、积分查询、密钥保护、日志元数据与远端面板来源限制。
+账号增删、积分查询、密钥保护、日志元数据与远端面板来源限制；
+另覆盖 OAuth PKCE 参数、state 不匹配/过期、回调地址校验、重复 UID 拒绝、
+日志分页上限与环形缓冲、缓存/推理字段落库、空缓冲不截断日志文件。
 
 另使用本机 Chromium 150 对合成账号实例做过浏览器验收：登录、25% 灰度热更新、
 账号/模型卡片、添加账号弹窗、深浅主题、移动端 390px 布局均通过，浏览器无 JS 异常。
