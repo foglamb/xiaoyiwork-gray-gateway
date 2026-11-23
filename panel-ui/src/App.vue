@@ -18,16 +18,12 @@ const authed = shallowRef(false)
 const tab = shallowRef('overview')
 const autoRefresh = shallowRef(true)
 
-const ICONS = {
-  overview: '◈', accounts: '☰', models: '◇', logs: '≣', settings: '⚙',
-}
-
 const tabs = computed(() => [
-  { id: 'overview', label: '总览', hint: '流量、Token 与缓存一目了然', icon: ICONS.overview },
-  { id: 'accounts', label: '账号池', hint: '稳定池与灰度池的账号与余额', icon: ICONS.accounts, badge: state.value?.accounts?.length },
-  { id: 'models', label: '模型', hint: '可用模型 ID 与能力', icon: ICONS.models, badge: state.value?.models?.length },
-  { id: 'logs', label: '请求记录', hint: '逐条查看调用、延迟与 Token 构成', icon: ICONS.logs },
-  { id: 'settings', label: '设置', hint: '接入地址、密钥与运行状态', icon: ICONS.settings },
+  { id: 'overview', label: '总览', hint: '流量、Token 与缓存一目了然', icon: 'overview' },
+  { id: 'accounts', label: '账号池', hint: '稳定池与灰度池的账号与余额', icon: 'accounts', badge: state.value?.accounts?.length },
+  { id: 'models', label: '模型', hint: '可用模型与能力', icon: 'models', badge: state.value?.models?.length },
+  { id: 'logs', label: '请求记录', hint: '逐条查看调用、延迟与 Token 构成', icon: 'logs' },
+  { id: 'settings', label: '设置', hint: '接入地址、密钥与运行状态', icon: 'settings' },
 ])
 
 const healthy = computed(() => {

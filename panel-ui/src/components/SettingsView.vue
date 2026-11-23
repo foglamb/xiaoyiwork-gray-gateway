@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, shallowRef } from 'vue'
+import AppIcon from './AppIcon.vue'
 import CodeBlock from './CodeBlock.vue'
 import { state, refreshAll } from '../composables/useDashboard.js'
 import { api, setAdminKey } from '../composables/useApi.js'
@@ -78,7 +79,9 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           <span class="kicker">CREDENTIALS</span>
           <h3 class="mt">访问密钥</h3>
         </div>
-        <button class="btn btn-sm" type="button" @click="revealed = !revealed">{{ revealed ? '隐藏' : '显示' }}</button>
+        <button class="btn btn-sm" type="button" @click="revealed = !revealed">
+          <AppIcon :name="revealed ? 'shield' : 'search'" :size="12" /> {{ revealed ? '隐藏' : '显示' }}
+        </button>
       </div>
 
       <div class="key-grid">
@@ -86,7 +89,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           <label>Admin Key（面板登录）</label>
           <div class="row">
             <input v-model="draft.adminKey" class="input mono-input" spellcheck="false" />
-            <button class="btn btn-sm" type="button" @click="rotate('adminKey')">生成</button>
+            <button class="btn btn-sm" type="button" @click="rotate('adminKey')"><AppIcon name="spark" :size="12" /> 生成</button>
           </div>
           <span class="muted tiny">当前：{{ masked(keys.adminKey || '') }}</span>
         </div>
@@ -94,7 +97,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           <label>API Key（客户端调用）</label>
           <div class="row">
             <input v-model="draft.apiKey" class="input mono-input" spellcheck="false" />
-            <button class="btn btn-sm" type="button" @click="rotate('apiKey')">生成</button>
+            <button class="btn btn-sm" type="button" @click="rotate('apiKey')"><AppIcon name="spark" :size="12" /> 生成</button>
           </div>
           <span class="muted tiny">当前：{{ masked(keys.apiKey || '') }}</span>
         </div>
@@ -141,15 +144,15 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           <h3 class="mt">退出登录</h3>
           <p class="muted tiny">清除浏览器里保存的管理密钥，不影响网关运行。</p>
         </div>
-        <button class="btn btn-danger" type="button" @click="emit('logout')">退出</button>
+        <button class="btn btn-danger" type="button" @click="emit('logout')"><AppIcon name="logout" :size="13" /> 退出</button>
       </div>
     </section>
   </div>
 </template>
 
 <style scoped>
-.stack { display: flex; flex-direction: column; gap: 14px; }
-.mt { margin-top: 4px; font-size: 14.5px; font-weight: 640; }
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.mt { margin-top: 5px; font-size: 15px; font-weight: 640; }
 .mb { margin: 4px 0 12px; }
 .endpoints { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .key-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; margin-top: 14px; }
@@ -159,5 +162,12 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
 .runtime div { display: flex; flex-direction: column; gap: 2px; }
 .runtime span { font-size: 10.5px; color: var(--dim); }
 .runtime b { font-size: 12.5px; font-family: var(--font-mono); font-weight: 600; color: var(--text-2); }
-.danger-zone { border-color: color-mix(in srgb, var(--red) 30%, var(--line)); }
+.danger-zone { border-color: color-mix(in srgb, var(--red) 26%, var(--line)); }
+
+@media (max-width: 720px) {
+  .key-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .card-pad { padding: 16px; }
+  .two { grid-template-columns: minmax(0, 1fr); }
+  .runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>

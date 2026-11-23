@@ -3,6 +3,7 @@ import { computed, shallowRef, watch } from 'vue'
 import { logs, logStats, refreshAll, loadLogs } from '../composables/useDashboard.js'
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
+import AppIcon from './AppIcon.vue'
 import { num, ms, clock, pct, compact } from '../composables/useFormat.js'
 
 const props = defineProps({ polling: { type: Boolean, default: true } })
@@ -84,8 +85,12 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
             <input type="checkbox" :checked="polling" @change="emit('update:polling', $event.target.checked)" />
             <span>自动刷新</span>
           </label>
-          <button class="btn btn-sm" type="button" :disabled="busy" @click="load">刷新</button>
-          <button class="btn btn-sm btn-danger" type="button" @click="clearAll">清空</button>
+          <button class="btn btn-sm" type="button" :disabled="busy" @click="load">
+            <AppIcon name="refresh" :size="12" :class="{ spin: busy }" /> 刷新
+          </button>
+          <button class="btn btn-sm btn-danger" type="button" @click="clearAll">
+            <AppIcon name="trash" :size="12" /> 清空
+          </button>
         </div>
       </header>
 
@@ -139,10 +144,11 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
       <footer class="pager">
         <span class="muted tiny">第 {{ page }} / {{ pages }} 页 · 共 {{ num(total) }} 条</span>
         <div class="row">
-          <button class="btn btn-sm" type="button" :disabled="page <= 1" @click="go(1)">首页</button>
-          <button class="btn btn-sm" type="button" :disabled="page <= 1" @click="go(page - 1)">上一页</button>
-          <button class="btn btn-sm" type="button" :disabled="page >= pages" @click="go(page + 1)">下一页</button>
-          <button class="btn btn-sm" type="button" :disabled="page >= pages" @click="go(pages)">末页</button>
+          <button class="btn btn-sm btn-icon" type="button" title="首页" :disabled="page <= 1" @click="go(1)"><AppIcon name="chevronsLeft" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="上一页" :disabled="page <= 1" @click="go(page - 1)"><AppIcon name="chevronLeft" :size="13" /></button>
+          <span class="page-now">{{ page }}</span>
+          <button class="btn btn-sm btn-icon" type="button" title="下一页" :disabled="page >= pages" @click="go(page + 1)"><AppIcon name="chevronRight" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="末页" :disabled="page >= pages" @click="go(pages)"><AppIcon name="chevronsRight" :size="13" /></button>
         </div>
       </footer>
     </div>
@@ -155,20 +161,114 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
 .mini { padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; border-radius: var(--r-md); }
 .mini span { font-size: 10.5px; color: var(--dim); }
 .mini b { font-size: 18px; font-family: var(--font-mono); font-weight: 640; }
-.mini b.good { color: var(--green); }
-.mini b.bad { color: var(--red); }
-.table-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px 13px; flex-wrap: wrap; }
-.table-head h3 { margin-top: 4px; font-size: 14.5px; font-weight: 640; }
-.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--dim); cursor: pointer; }
+.mini b.mini b.bad { color: var(--red); }
+.table-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 17px 19px 13px; flex-wrap: wrap; }
+.table-head h3 { margin-top: 5px; font-size: 15px; font-weight: 640; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--dim); cursor: pointer; user-select: none; }
 .toggle input { accent-color: var(--accent); }
 .row-click { cursor: pointer; }
 .detail-row td { background: var(--surface-2); padding: 0; }
-.detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 20px; padding: 13px 18px; }
+.detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 20px; padding: 14px 18px; }
 .detail-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .detail-item.wide { grid-column: 1 / -1; }
-.detail-item span { font-size: 10px; color: var(--dim); }
+.detail-item span { font-size: 10px; color: var(--dim-2); text-transform: uppercase; letter-spacing: 0.05em; }
 .detail-item code { font-size: 11px; color: var(--text-2); word-break: break-all; }
 .err-text { color: var(--red) !important; }
-.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 18px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
 .good { color: var(--green); }
+.spin { animation: spin 900ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.page-now {
+  min-width: 34px; text-align: center; font-family: var(--font-mono);
+  font-size: 11.5px; color: var(--text-2); font-weight: 600;
+}
+.mini { border-radius: var(--r-md); }
+.mini b { letter-spacing: -0.02em; }
+
+/* phone: collapse the table into compact cards */
+@media (max-width: 720px) {
+  .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .mini { padding: 10px 11px; }
+  .mini span { font-size: 9.5px; }
+  .mini b { font-size: 15px; }
+  .table-head { padding: 13px 13px 10px; gap: 8px; }
+  .table-head .row { width: 100%; justify-content: space-between; }
+  .table-wrap { overflow-x: visible; }
+  thead { display: none; }
+
+  tbody tr.row-click {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'time  status dur'
+      'model route  route';
+    align-items: center;
+    gap: 3px 10px;
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  tbody tr.row-click td { padding: 0; border: 0; }
+  tbody tr.row-click td:nth-child(1) { grid-area: time; font-size: 10.5px; color: var(--dim-2); }
+  tbody tr.row-click td:nth-child(2) { grid-area: model; font-size: 12px; font-weight: 600; }
+  tbody tr.row-click td:nth-child(3) { grid-area: route; justify-self: start; }
+  tbody tr.row-click td:nth-child(4) { grid-area: status; justify-self: end; }
+  tbody tr.row-click td:nth-child(5) { grid-area: dur; justify-self: end; font-size: 11px; color: var(--text-2); }
+  tbody tr.row-click td:nth-child(6) { display: none; }
+  tbody tr.row-click td:nth-child(7),
+  tbody tr.row-click td:nth-child(8) { display: none; }
+  tbody tr.row-click td:nth-child(9) { display: none; }
+  tbody tr.row-click td:nth-child(5)::before { content: ''; }
+
+  .detail-row, .detail-row td { display: block; }
+  .pager { padding: 9px 13px; }
+  .pager .muted { order: 2; width: 100%; text-align: center; }
+}
+.good { color: var(--green); }
+.spin { animation: spin 900ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.page-now {
+  min-width: 34px; text-align: center; font-family: var(--font-mono);
+  font-size: 11.5px; color: var(--text-2); font-weight: 600;
+}
+.mini { border-radius: var(--r-md); }
+.mini b { letter-spacing: -0.02em; }
+
+/* phone: collapse the table into compact cards */
+@media (max-width: 720px) {
+  .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .mini { padding: 10px 11px; }
+  .mini span { font-size: 9.5px; }
+  .mini b { font-size: 15px; }
+  .table-head { padding: 13px 13px 10px; gap: 8px; }
+  .table-head .row { width: 100%; justify-content: space-between; }
+  .table-wrap { overflow-x: visible; }
+  thead { display: none; }
+
+  tbody tr.row-click {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      'time  status dur'
+      'model route  route';
+    align-items: center;
+    gap: 3px 10px;
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  tbody tr.row-click td { padding: 0; border: 0; }
+  tbody tr.row-click td:nth-child(1) { grid-area: time; font-size: 10.5px; color: var(--dim-2); }
+  tbody tr.row-click td:nth-child(2) { grid-area: model; font-size: 12px; font-weight: 600; }
+  tbody tr.row-click td:nth-child(3) { grid-area: route; justify-self: start; }
+  tbody tr.row-click td:nth-child(4) { grid-area: status; justify-self: end; }
+  tbody tr.row-click td:nth-child(5) { grid-area: dur; justify-self: end; font-size: 11px; color: var(--text-2); }
+  tbody tr.row-click td:nth-child(6) { display: none; }
+  tbody tr.row-click td:nth-child(7),
+  tbody tr.row-click td:nth-child(8) { display: none; }
+  tbody tr.row-click td:nth-child(9) { display: none; }
+  tbody tr.row-click td:nth-child(5)::before { content: ''; }
+
+  .detail-row, .detail-row td { display: block; }
+  .pager { padding: 9px 13px; }
+  .pager .muted { order: 2; width: 100%; text-align: center; }
+}
 </style>
