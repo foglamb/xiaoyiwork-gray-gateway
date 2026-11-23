@@ -1,0 +1,7 @@
+node_modules/
+config/config.json
+config/*.tmp
+*.log
+*.tgz
+.env
+.DS_Store

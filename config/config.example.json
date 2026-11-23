@@ -1,0 +1,43 @@
+{
+  "listen": "0.0.0.0",
+  "port": 17356,
+  "upstreamUrl": "https://hag-drcn.op.dbankcloud.com/celia/v1/sse-api/chat/completions",
+  "apiKey": "CHANGE_ME_PROXY_KEY",
+  "adminKey": "CHANGE_ME_ADMIN_KEY",
+  "requestTimeoutMs": 120000,
+  "maxBodyBytes": 10485760,
+  "allowGrayModels": false,
+  "grayModels": ["Kimi_K3.1_Pro_VE"],
+  "gray": {
+    "enabled": true,
+    "percentage": 10,
+    "salt": "replace-with-a-random-canary-salt",
+    "allowHeaderOverride": true,
+    "allowCookieOverride": true,
+    "allowlist": [],
+    "denylist": [],
+    "pool": "gray",
+    "models": ["Kimi_K3.1_Pro_VE"],
+    "shadow": false
+  },
+  "accounts": {
+    "stable": [
+      {
+        "id": "stable-1",
+        "credential": "STABLE_BUSINESS_CREDENTIAL",
+        "uid": "STABLE_UID",
+        "deviceId": "STABLE_DEVICE_ID",
+        "refreshToken": "STABLE_REFRESH_TOKEN"
+      }
+    ],
+    "gray": [
+      {
+        "id": "gray-1",
+        "credential": "GRAY_BUSINESS_CREDENTIAL",
+        "uid": "GRAY_UID",
+        "deviceId": "GRAY_DEVICE_ID",
+        "refreshToken": "GRAY_REFRESH_TOKEN"
+      }
+    ]
+  }
+}

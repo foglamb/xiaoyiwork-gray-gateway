@@ -1,0 +1,16 @@
+services:
+  xiaoyiwork-proxy:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:17356:17356"
+    volumes:
+      # Mount the directory: credential renewal writes a temporary file then renames it.
+      - ./config:/app/config:rw
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
