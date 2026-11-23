@@ -144,7 +144,7 @@ function renderAccounts() {
         ? (quota.windows.length ? `${num(remaining)} 点` : '额度接口无窗口')
         : (account.quotaError ? '查询失败' : '查询中…')
       const quotaTitle = account.quotaError ? `额度查询失败：${account.quotaError}` : (quota?.windows || []).map((window) => `${window.name}: ${window.remaining ?? '—'} ${window.unit || ''}`).join('\n')
-      return `<article class="tile"><div class="tile-body"><div class="tile-icon ${pool}">${pool === 'stable' ? 'S' : 'G'}</div><div class="tile-text"><div class="tile-title">${esc(account.displayName || account.id)}<span class="badge ${account.hasRefreshToken ? 'ok' : 'mute'}">${account.hasRefreshToken ? '自动续期' : '手动凭据'}</span>${account.cooling ? '<span class="badge warn" title="请求失败已临时跳过，到期自动恢复">冷却中</span>' : ''}${account.source === 'oauth' ? '<span class="badge brand">华为登录</span>' : ''}</div><div class="tile-line"><span>UID</span><b class="mono">${esc(account.uid)}</b></div><div class="tile-line" title="${esc(quotaTitle)}"><span>积分余额</span><b>${esc(quotaText)}</b></div><div class="tile-line"><span>请求数</span><b>${num(account.requests)}</b></div><div class="tile-line"><span>凭据到期</span><b>${esc(expiry)}</b></div></div></div><div class="tile-foot"><button class="link" data-quota="${esc(account.id)}" title="重新向上游查询积分与权益包">刷新积分</button><span class="grow"></span><button class="link danger" data-delete-account="${esc(account.id)}">删除</button></div></article>`
+      return `<article class="tile"><div class="tile-body"><div class="tile-icon ${pool}">${pool === 'stable' ? 'S' : 'G'}</div><div class="tile-text"><div class="tile-title">${esc(account.displayName || account.id)}<span class="badge ${account.hasRefreshToken ? 'ok' : 'mute'}">${account.hasRefreshToken ? '自动续期' : '手动凭据'}</span>${account.cooling ? '<span class="badge warn" title="请求失败已临时跳过，到期自动恢复">冷却中</span>' : ''}${account.health && !account.health.ok ? `<span class="badge err" title="${esc(account.health.message)}">凭据异常</span>` : account.health?.ok ? '<span class="badge ok">凭据正常</span>' : ''}${account.source === 'oauth' ? '<span class="badge brand">华为登录</span>' : ''}</div><div class="tile-line"><span>UID</span><b class="mono">${esc(account.uid)}</b></div><div class="tile-line" title="${esc(quotaTitle)}"><span>积分余额</span><b>${esc(quotaText)}</b></div><div class="tile-line"><span>请求数</span><b>${num(account.requests)}</b></div><div class="tile-line"><span>凭据到期</span><b>${esc(expiry)}</b></div></div></div><div class="tile-foot"><button class="link" data-quota="${esc(account.id)}" title="重新向上游查询积分与权益包">刷新积分</button><button class="link" data-probe="${esc(account.id)}" title="检测该账号凭据是否仍然有效">检测</button><span class="grow"></span><button class="link danger" data-delete-account="${esc(account.id)}">删除</button></div></article>`
     }).join('') : '<div class="empty">此账号池暂无账号</div>'
   }
 }
@@ -190,8 +190,8 @@ function renderLogs() {
   state.logRenderKey = key
   $('logs-body').innerHTML = state.logs.length ? state.logs.map((entry) => {
     const cacheRate = entry.promptTokens ? ((entry.cachedTokens || 0) / entry.promptTokens) * 100 : null
-    return `<tr><td class="muted">${esc(new Date(entry.at).toLocaleString('zh-CN', { hour12: false }))}</td><td class="mono">${esc(entry.model || '—')}</td><td><span class="badge ${entry.route === 'gray' ? 'gray' : 'ok'}">${entry.route === 'gray' ? '灰度' : '稳定'}</span></td><td>${esc(entry.accountId || '—')}</td><td><span class="badge ${entry.status < 400 ? 'ok' : 'err'}" title="${esc(entry.error)}">${entry.status === 499 ? '取消' : entry.status < 400 ? entry.status : `失败 ${entry.status}`}</span></td><td class="mono">${entry.ms === null ? '—' : `${num(entry.ms)} ms`}</td><td class="mono">${entry.promptTokens === null ? '—' : num(entry.promptTokens)}</td><td class="mono">${entry.cachedTokens === null ? '—' : num(entry.cachedTokens)}</td><td class="mono">${cacheRate === null ? '—' : formatRate(cacheRate)}</td><td class="mono">${entry.completionTokens === null ? '—' : num(entry.completionTokens)}</td><td class="mono">${entry.reasoningTokens === null ? '—' : num(entry.reasoningTokens)}</td><td class="mono">${entry.totalTokens === null ? '—' : num(entry.totalTokens)}</td></tr>`
-  }).join('') : '<tr><td colspan="12" class="empty">暂无请求记录。客户端调用后会在这里看到缓存命中与积分消耗。</td></tr>'
+    return `<tr><td class="muted">${esc(new Date(entry.at).toLocaleString('zh-CN', { hour12: false }))}</td><td class="mono">${esc(entry.model || '—')}</td><td><span class="badge ${entry.route === 'gray' ? 'gray' : 'ok'}">${entry.route === 'gray' ? '灰度' : '稳定'}</span></td><td>${esc(entry.accountId || '—')}</td><td><span class="badge ${entry.status < 400 ? 'ok' : 'err'}" title="${esc(entry.error)}">${entry.status === 499 ? '取消' : entry.status < 400 ? entry.status : `失败 ${entry.status}`}</span></td><td class="mono">${entry.ms === null ? '—' : `${num(entry.ms)} ms`}</td><td class="mono" title="首字节 ${entry.firstByteMs ?? '—'} ms">${entry.ttftMs === null || entry.ttftMs === undefined ? '—' : `${num(entry.ttftMs)} ms`}</td><td class="mono">${entry.promptTokens === null ? '—' : num(entry.promptTokens)}</td><td class="mono">${entry.cachedTokens === null ? '—' : num(entry.cachedTokens)}</td><td class="mono">${cacheRate === null ? '—' : formatRate(cacheRate)}</td><td class="mono">${entry.completionTokens === null ? '—' : num(entry.completionTokens)}</td><td class="mono">${entry.reasoningTokens === null ? '—' : num(entry.reasoningTokens)}</td><td class="mono">${entry.totalTokens === null ? '—' : num(entry.totalTokens)}</td></tr>`
+  }).join('') : '<tr><td colspan="13" class="empty">暂无请求记录。客户端调用后会在这里看到缓存命中、首 token 延迟与 Token 构成。</td></tr>'
 }
 
 // Chart state: x axis is time buckets, y axis is the selected metric.
@@ -431,7 +431,8 @@ function resetOauth() {
   $('oauth-fallback').hidden = true
   $('start-oauth').disabled = false
   $('oauth-callback-url').value = ''
-  $('oauth-step-text').textContent = '等待在华为页面完成授权…'
+  $('oauth-url').textContent = '—'
+  $('oauth-step-text').textContent = '等待授权…'
 }
 async function cancelOauth() {
   if (!oauth) return
@@ -447,11 +448,14 @@ $('start-oauth').addEventListener('click', async () => {
   $('start-oauth').disabled = true
   try {
     oauth = await api('/api/auth/oauth/start', { method: 'POST', body: JSON.stringify({ pool }) })
+    // No automatic window.open: the user must be able to copy the URL and use
+    // their own browser, since the callback points at this machine only.
     $('oauth-open-link').href = oauth.url
+    $('oauth-url').textContent = oauth.url
+    $('oauth-url').title = oauth.url
     $('oauth-status').hidden = false
-    $('oauth-step-text').textContent = `请在新窗口完成华为授权。网关在 ${location.hostname} 上，授权后浏览器会跳转到 127.0.0.1:17355（这台电脑本机）——如果打不开是正常的，把地址栏整条网址复制到下方即可完成登录。`
     $('oauth-fallback').hidden = false
-    window.open(oauth.url, '_blank', 'noopener')
+    $('oauth-step-text').textContent = '等待授权…（本机浏览器可直接完成；远程设备请用下方回调粘贴）'
     clearInterval(oauthPoll)
     oauthPoll = setInterval(pollOauth, 2000)
   } catch (error) {
@@ -482,7 +486,7 @@ async function pollOauth() {
     if (error.status === 404 || error.status === 410) { clearInterval(oauthPoll); $('oauth-step-text').textContent = '登录流程已过期，请重新发起。'; $('start-oauth').disabled = false }
   }
 }
-$('copy-oauth-url').addEventListener('click', () => { if (oauth) copyText(oauth.url) })
+$('copy-oauth-url').addEventListener('click', () => { if (oauth) copyText(oauth.url); else toast('请先生成登录链接', true) })
 $('submit-callback').addEventListener('click', async () => {
   if (!oauth) return toast('请先点击“使用华为账号登录”', true)
   try {
@@ -503,6 +507,17 @@ $('import-account').addEventListener('click', async () => {
 $('stable-accounts').addEventListener('click', accountAction)
 $('gray-accounts').addEventListener('click', accountAction)
 async function accountAction(event) {
+  const probe = event.target.closest('[data-probe]')
+  if (probe) {
+    probe.disabled = true
+    try {
+      const result = await api('/api/accounts/probe', { method: 'POST', body: '{}' })
+      const mine = result.results.find((row) => row.id === probe.dataset.probe)
+      toast(mine ? (mine.ok ? `${mine.id} 凭据正常` : `${mine.id} 异常：${mine.message}`) : '探测完成', !mine?.ok)
+      await refresh({ quiet: true })
+    } catch (error) { toast(error.message, true) } finally { probe.disabled = false }
+    return
+  }
   const query = event.target.closest('[data-quota]')
   if (query) {
     query.disabled = true

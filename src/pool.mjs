@@ -30,6 +30,51 @@ export class AccountPool {
   /** Accounts temporarily skipped after auth/limit failures, with expiry timestamps. */
   cooldownUntil = new Map()
 
+  /** Last health probe result per account id. */
+  health = new Map()
+
+  /**
+   * Cheap probe: one billing query is enough to tell whether a credential still
+   * works, without spending model tokens. Returns a compact state for the panel.
+   */
+  async probe(account, { timeoutMs = 15000 } = {}) {
+    const base = this.#upstreamOrigin()
+    try {
+      const response = await this.fetch(`${base}/ability-billing/v1/agent-purchases-client/privilege/query`, {
+        method: 'POST',
+        headers: authHeaders(account, { sse: false }),
+        body: JSON.stringify({
+          accountType: 'HW_UID', agentId: '1',
+          endpoint: {
+            device: { brand: 'HUAWEI', deviceId: account.deviceId }, eduMode: 'NONEDU',
+            foregroundPkgName: '', isXiaoyiAPP: false, language: 'zh_CN',
+            languageMode: 'MANDARIN', locale: 'default',
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const ok = response.ok
+      const data = await response.json().catch(() => ({}))
+      const state = {
+        at: Date.now(), ok, status: response.status,
+        errorCode: data.errorCode ?? null,
+        message: ok ? (data.errorMessage || 'Success') : String(data.errorMessage || data.desc || `HTTP ${response.status}`).slice(0, 200),
+      }
+      if (!ok && [401, 403].includes(response.status)) this.cool(account, 300000, `probe ${response.status}`)
+      if (ok) this.clearCool(account)
+      this.health.set(account.id, state)
+      return state
+    } catch (error) {
+      const state = { at: Date.now(), ok: false, status: 0, errorCode: null, message: `探测失败：${error.message}` }
+      this.health.set(account.id, state)
+      return state
+    }
+  }
+
+  healthOf(account) {
+    return this.health.get(account.id) || null
+  }
+
   isCooling(account) {
     const until = this.cooldownUntil.get(account.id)
     if (!until) return false
@@ -163,7 +208,7 @@ export class AccountPool {
    * - 5xx / network: cool briefly, try the next one.
    * The client sees one request; it never learns an account was swapped.
    */
-  async chat(body, route, { signal, configPath = this.configPath, onUsage } = {}) {
+  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken } = {}) {
     this.configPath = configPath
     const outgoing = { ...body, stream: true }
     const attempted = new Set()
@@ -205,8 +250,9 @@ export class AccountPool {
 
       if (response.ok && response.body) {
         this.clearCool(account)
+        this.lastFirstByteAt = Date.now()
         this.stats.failovers = (this.stats.failovers || 0) + (attempt > 0 ? 1 : 0)
-        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage })
+        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage, onFirstToken })
       }
 
       this.stats.upstreamErrors++
@@ -236,7 +282,7 @@ export class AccountPool {
       : new HttpError(503, `${route.pool} 池没有可用账号，请检查凭据或在面板重新登录${detail}`, 'account_pool_empty')
   }
 
-  #respond({ response, account, route, pool, body, signal, onUsage }) {
+  #respond({ response, account, route, pool, body, signal, onUsage, onFirstToken }) {
     const headers = new Headers({
       'x-xiaoyi-route': route.selected ? 'gray' : 'stable',
       'x-xiaoyi-pool': pool,
@@ -249,14 +295,20 @@ export class AccountPool {
     if (body.stream !== false) {
       headers.set('content-type', 'text/event-stream; charset=utf-8')
       headers.set('x-accel-buffering', 'no')
-      return new Response(transformSse(response.body, body.model, { signal, onUsage }), { status: 200, headers })
+      return new Response(transformSse(response.body, body.model, {
+        signal, onUsage, onFirstToken, heartbeatMs: this.config.streamHeartbeatMs || 15000,
+      }), { status: 200, headers })
     }
-    return aggregateSse(response.body, body.model, { signal, onUsage }).then((result) => {
+    return aggregateSse(response.body, body.model, { signal, onUsage, onFirstToken }).then((result) => {
       headers.set('content-type', 'application/json; charset=utf-8')
       return new Response(JSON.stringify(result), { status: 200, headers })
     })
   }
 
+  /**
+   * Query balance. Each upstream call is isolated: one network blip must not
+   * turn the whole endpoint into a 500, and partial results are still useful.
+   */
   async quota(account) {
     const base = this.#upstreamOrigin()
     const query = (agentId) => this.fetch(`${base}/ability-billing/v1/agent-purchases-client/privilege/query`, {
@@ -270,24 +322,47 @@ export class AccountPool {
           languageMode: 'MANDARIN', locale: 'default',
         },
       }),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(20000),
     })
-    const responses = await Promise.all([query('1'), query('agent208b6760552b4fa0b395e5165d0d771e')])
-    for (let index = 0; index < responses.length; index++) {
-      if (![401, 403].includes(responses[index].status)) continue
-      await responses[index].body?.cancel()
-      if (!account.refreshToken) throw new HttpError(401, `账号 ${account.id} 凭据失效且没有 refreshToken`, 'authentication_error')
-      await this.renew(account)
-      responses[index] = await query(index === 0 ? '1' : 'agent208b6760552b4fa0b395e5165d0d771e')
+
+    // Settle each call independently and retry transient failures once.
+    const settle = async (agentId) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await query(agentId)
+          if ([401, 403].includes(response.status)) {
+            await response.body?.cancel().catch(() => {})
+            if (!account.refreshToken) {
+              return { ok: false, status: response.status, error: `账号 ${account.id} 凭据失效且没有 refreshToken` }
+            }
+            await this.renew(account)
+            continue
+          }
+          const data = await response.json().catch(() => ({}))
+          return { ok: response.ok, status: response.status, data }
+        } catch (error) {
+          if (attempt === 1) {
+            return { ok: false, status: 0, error: `上游连接失败：${error.message}${error.cause?.code ? ` (${error.cause.code})` : ''}` }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+      }
+      return { ok: false, status: 0, error: '额度查询重试后仍失败' }
     }
-    const [premiumResponse, platformResponse] = responses
-    const premium = await premiumResponse.json().catch(() => ({}))
-    const platform = await platformResponse.json().catch(() => ({}))
-    if (!premiumResponse.ok && !platformResponse.ok) {
-      throw new HttpError(502, `额度查询失败（会员 ${premiumResponse.status} / 权益包 ${platformResponse.status}）`, 'quota_unavailable')
+
+    const [premiumResult, platformResult] = await Promise.all([
+      settle('1'), settle('agent208b6760552b4fa0b395e5165d0d771e'),
+    ])
+    if (!premiumResult.ok && !platformResult.ok) {
+      const detail = [premiumResult.error, platformResult.error].filter(Boolean).join('；') ||
+        `会员 ${premiumResult.status} / 权益包 ${platformResult.status}`
+      throw new HttpError(502, `额度查询失败：${detail}`, 'quota_unavailable')
     }
-    const points = premium.celiaPremiumPrivilege?.aiPoints || {}
+
+    const premium = premiumResult.data || {}
+    const platform = platformResult.data || {}
     const windows = []
+    const points = premium.celiaPremiumPrivilege?.aiPoints || {}
     if (typeof points.totalPoints === 'number') {
       windows.push({ name: premium.celiaPremiumPrivilege?.membership?.skuGroupName || '会员积分', remaining: points.totalPoints, unit: '点' })
     }
@@ -299,7 +374,11 @@ export class AccountPool {
         expiresAt: privilege.expireTime || null,
       })
     }
-    return { at: Date.now(), plan: premium.celiaPremiumPrivilege?.membership?.skuGroupName || null, windows }
+    const partial = !premiumResult.ok || !platformResult.ok
+    return {
+      at: Date.now(), plan: premium.celiaPremiumPrivilege?.membership?.skuGroupName || null, windows,
+      ...(partial ? { partial: true, warning: [premiumResult.error, platformResult.error].filter(Boolean).join('；') } : {}),
+    }
   }
 }
 

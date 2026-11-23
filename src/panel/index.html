@@ -137,7 +137,7 @@
           <button class="sm" id="log-next">下一页</button>
           <button class="sm" id="log-latest">回到最新</button>
         </div>
-        <div class="table-wrap log-table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>流量池</th><th>账号</th><th>结果</th><th>耗时</th><th>输入</th><th>缓存</th><th>命中率</th><th>输出</th><th>推理</th><th>合计</th></tr></thead><tbody id="logs-body"><tr><td colspan="12" class="empty">暂无请求记录</td></tr></tbody></table></div>
+        <div class="table-wrap log-table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>流量池</th><th>账号</th><th>结果</th><th>耗时</th><th>首 token</th><th>输入</th><th>缓存</th><th>命中率</th><th>输出</th><th>推理</th><th>合计</th></tr></thead><tbody id="logs-body"><tr><td colspan="13" class="empty">暂无请求记录</td></tr></tbody></table></div>
         <p class="footnote">日志分页加载，每页 50 条，服务端最多保留 <span id="log-cap">—</span> 条。缓存命中率来自上游 usage.prompt_tokens_details.cached_tokens。</p>
       </section>
 
@@ -165,18 +165,22 @@
       <label class="form-label" for="account-pool">加入账号池</label>
       <select id="account-pool" required><option value="stable">稳定池（常规流量）</option><option value="gray">灰度池（灰度用户与灰度模型）</option></select>
     </div>
-    <button class="primary full" id="start-oauth" type="button">使用华为账号登录</button>
+    <button class="primary full" id="start-oauth" type="button">生成华为登录链接</button>
     <div class="login-status" id="oauth-status" hidden>
-      <div class="login-step" id="oauth-step-text">等待在华为页面完成授权…</div>
+      <label class="form-label" for="oauth-url">① 打开这个链接，用华为账号登录</label>
+      <div class="connect-value oauth-url-row">
+        <code id="oauth-url">—</code>
+        <button class="copy" id="copy-oauth-url" type="button" title="复制登录链接">⧉</button>
+      </div>
       <div class="login-actions">
-        <a class="link-button" id="oauth-open-link" href="#" target="_blank" rel="noopener noreferrer">在新窗口打开华为登录页</a>
-        <button class="link" id="copy-oauth-url" type="button">复制登录链接</button>
+        <a class="link-button" id="oauth-open-link" href="#" target="_blank" rel="noopener noreferrer">在本机新窗口打开</a>
         <button class="link" id="cancel-oauth" type="button">取消</button>
       </div>
-      <div class="fallback" id="oauth-fallback" hidden>
-        <p class="footnote">如果浏览器停在 <code>127.0.0.1:17355</code> 的空白页或打不开，说明回调地址在远程设备上。复制地址栏整段网址，粘贴到这里完成登录：</p>
+      <div class="login-step" id="oauth-step-text">等待授权…</div>
+      <div class="fallback" id="oauth-fallback">
+        <label class="form-label" for="oauth-callback-url">② 登录后浏览器会跳到 127.0.0.1:17355（打不开是正常的），把地址栏整条网址粘到这里</label>
         <input id="oauth-callback-url" placeholder="http://127.0.0.1:17355/auth/callback?code=…&state=…">
-        <button class="primary full" id="submit-callback" type="button">用此回调完成登录</button>
+        <button class="primary full" id="submit-callback" type="button">完成登录</button>
       </div>
     </div>
     <details class="advanced">

@@ -1,42 +1,90 @@
-import { appendFileSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 export class RequestLog {
-  constructor({ configPath = null, maxEntries = 1000, persist = true } = {}) {
+  constructor({ configPath = null, maxEntries = 1000, persist = true, segmentBytes = 4 * 1024 * 1024 } = {}) {
+    this.dir = configPath ? resolve(dirname(configPath)) : null
     this.path = configPath ? resolve(dirname(configPath), 'requests.jsonl') : null
     // Hard cap: the in-memory ring buffer and the on-disk file both stay bounded.
     this.maxEntries = Math.max(50, Math.min(Number(maxEntries) || 1000, 5000))
+    // Segments are append-only; a full segment is rotated instead of rewritten.
+    this.segmentBytes = Math.max(256 * 1024, Math.min(Number(segmentBytes) || 4 * 1024 * 1024, 64 * 1024 * 1024))
     this.pageSize = 100
     this.persist = persist && Boolean(this.path)
     this.entries = []
     this.active = new Map()
     this.onFlush = null
+    this.segment = 0
     if (this.persist) this.#load()
+  }
+
+  #segmentPath(index) {
+    return index === 0 ? this.path : `${this.path}.${index}`
   }
 
   #load() {
     try {
-      this.entries = readFileSync(this.path, 'utf8').split('\n').filter(Boolean).slice(-this.maxEntries)
+      // Newest segment wins; earlier segments only fill the tail of the ring buffer.
+      let index = 0
+      while (existsSync(this.#segmentPath(index + 1))) index++
+      this.segment = index
+      const lines = readFileSync(this.#segmentPath(index), 'utf8').split('\n').filter(Boolean)
+      let parsed = lines.slice(-this.maxEntries)
         .map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
+      // Top up from the previous segment when the current one is short.
+      if (parsed.length < this.maxEntries && index > 0) {
+        const previous = readFileSync(this.#segmentPath(index - 1), 'utf8').split('\n').filter(Boolean)
+        const older = previous.slice(-(this.maxEntries - parsed.length))
+          .map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
+        parsed = [...older, ...parsed]
+      }
+      this.entries = parsed.slice(-this.maxEntries)
+      this.#pruneSegments()
     } catch { /* The first run has no log. A corrupt log must not stop the API. */ }
   }
 
-  #store(entry, append = true) {
-    // Never truncate a non-empty log because of an empty in-memory buffer.
-    if (!append && !this.entries.length && this.#fileSize() > 0) return
+  /** Keep at most three segments so disk usage stays bounded without rewriting. */
+  #pruneSegments() {
+    for (const name of readdirSync(this.dir)) {
+      const match = /^requests\.jsonl\.(\d+)$/.exec(name)
+      if (!match) continue
+      if (Number(match[1]) < this.segment - 2) {
+        try { unlinkSync(resolve(this.dir, name)) } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /** Rotate instead of rewriting: a full segment starts a new file. */
+  #rotate() {
+    try {
+      const size = this.#fileSize()
+      if (size < this.segmentBytes) return false
+      this.segment++
+      renameSync(this.path, `${this.path}.${this.segment}`)
+      this.#pruneSegments()
+      return true
+    } catch { return false }
+  }
+
+  #appendLine(record) {
+    try {
+      this.#rotate()
+      appendFileSync(this.#segmentPath(this.segment), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * Persist one record. Always append-only: reaching maxEntries must never trigger
+   * a whole-file rewrite on the request path (that blocks the event loop and
+   * stalls streaming responses).
+   */
+  #store(entry) {
     if (this.onFlush) {
       Promise.resolve(this.onFlush(this.entries)).catch(() => {})
       return
     }
     if (!this.persist) return
-    try {
-      if (append) appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
-      else {
-        const temporary = `${this.path}.${process.pid}.tmp`
-        writeFileSync(temporary, `${this.entries.map((item) => JSON.stringify(item)).join('\n')}\n`, { mode: 0o600 })
-        renameSync(temporary, this.path)
-      }
-    } catch { /* Diagnostics must never break a streaming response. */ }
+    this.#appendLine(entry)
   }
 
   begin({ id, model, stream, route, accountId }) {
@@ -46,12 +94,14 @@ export class RequestLog {
       accountId: '', accountLabel: String(accountId || '').slice(0, 80), status: 'pending', ms: null,
       promptTokens: null, completionTokens: null, totalTokens: null,
       cachedTokens: null, reasoningTokens: null, rate: null, error: '',
+      // Latency breakdown: first upstream byte, first streamed token, total.
+      firstByteMs: null, firstTokenMs: null, ttftMs: null,
     }
     this.active.set(id, entry)
     return entry
   }
 
-  finish(id, { status = 200, usage, error = '', accountId, rate = null } = {}) {
+  finish(id, { status = 200, usage, error = '', accountId, rate = null, marks = null } = {}) {
     const entry = this.active.get(id)
     if (!entry) return
     this.active.delete(id)
@@ -66,11 +116,16 @@ export class RequestLog {
     entry.cachedTokens = numberOrNull(usage?.prompt_tokens_details?.cached_tokens)
     entry.reasoningTokens = numberOrNull(usage?.completion_tokens_details?.reasoning_tokens)
     entry.rate = rate || null
+    if (marks?.firstByteAt) entry.firstByteMs = marks.firstByteAt - entry.at
+    if (marks?.firstTokenAt) {
+      entry.firstTokenMs = marks.firstTokenAt - entry.at
+      entry.ttftMs = entry.firstTokenMs
+    }
     // Never record upstream response bodies: they could contain an echoed credential.
     entry.error = error ? String(error).slice(0, 160).replace(/(bearer|credential|token)\s*[:=]?\s*\S+/gi, '$1 [REDACTED]') : ''
     this.entries.push(entry)
     if (this.entries.length > this.maxEntries) this.entries = this.entries.slice(-this.maxEntries)
-    this.#store(entry, this.entries.length < this.maxEntries)
+    this.#store(entry)
   }
 
   /** Newest-first page. Response size is capped regardless of client input. */
@@ -98,7 +153,7 @@ export class RequestLog {
 
   /** Test seam: exercises the rewrite path without any truncation risk in production. */
   flushNow() {
-    this.#store({ flushed: true }, false)
+    this.#appendLine({ flushed: true })
   }
 
   clear() {

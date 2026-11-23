@@ -8,7 +8,12 @@
   "maxBodyBytes": 10485760,
   "allowPanelFromLan": false,
   "allowGrayModels": false,
-  "grayModels": ["Kimi_K3.1_Pro_VE"],
+  "grayModels": [
+    "Kimi_K3.1_Pro_VE"
+  ],
+  "accountProbeMinutes": 15,
+  "streamHeartbeatMs": 15000,
+  "logMaxEntries": 1000,
   "gray": {
     "enabled": true,
     "percentage": 10,
@@ -18,7 +23,9 @@
     "allowlist": [],
     "denylist": [],
     "pool": "gray",
-    "models": ["Kimi_K3.1_Pro_VE"],
+    "models": [
+      "Kimi_K3.1_Pro_VE"
+    ],
     "shadow": false
   },
   "accounts": {

@@ -113,6 +113,29 @@ export function createProxyServer(config, {
   }
 
   const oauth = oauthManager || new OAuthManager({ fetchImpl, logger, listen: config.listen === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1' })
+
+  /** Periodic health probe: catches dead credentials before a user request does. */
+  let probeTimer = null
+  const probeIntervalMs = Math.max(60000, Number(config.accountProbeMinutes || 15) * 60000)
+  async function probeAll() {
+    const accounts = [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]
+    const results = []
+    for (const account of accounts) {
+      const state = await runtime.pool.probe(account).catch((error) => ({ ok: false, message: error.message }))
+      results.push({ id: account.id, ok: state.ok, status: state.status, message: state.message })
+      if (!state.ok) logger.warn(`[probe] account=${account.id} unhealthy: ${state.message}`)
+    }
+    return results
+  }
+  function startProbing() {
+    // Opt-in: probing performs real upstream calls, so it must be explicit.
+    // Set accountProbeMinutes (e.g. 15) to enable the scheduled health check.
+    if (!(Number(config.accountProbeMinutes) > 0)) return
+    clearInterval(probeTimer)
+    probeAll().catch(() => {})
+    probeTimer = setInterval(() => { probeAll().catch(() => {}) }, probeIntervalMs)
+    probeTimer.unref?.()
+  }
   let panelHtml
   let panelJs
   let panelCss
@@ -202,6 +225,7 @@ export function createProxyServer(config, {
         displayName: account.displayName || null,
         cooling: runtime.pool.isCooling(account),
         coolingUntil: runtime.pool.cooldownUntil.get(account.id) || null,
+        health: runtime.pool.healthOf(account),
       })))
       // Refresh quota for accounts that have never been queried or are stale, without blocking the panel.
       for (const account of [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]) {
@@ -311,11 +335,17 @@ export function createProxyServer(config, {
       const id = decodeURIComponent(url.pathname.split('/')[3])
       const account = [...runtime.config.accounts.stable, ...runtime.config.accounts.gray].find((item) => item.id === id)
       if (!account) throw new HttpError(404, '账号不存在', 'account_not_found')
-      const quota = await runtime.pool.quota(account)
-      quotaCache.set(id, quota)
-      quotaError.delete(id)
-      quotaInflight.delete(id)
-      sendJson(response, 200, { ok: true, quota })
+      try {
+        const quota = await runtime.pool.quota(account)
+        quotaCache.set(id, quota)
+        quotaError.delete(id)
+        sendJson(response, 200, { ok: true, quota })
+      } catch (error) {
+        quotaInflight.delete(id)
+        quotaError.set(id, { message: error.message, at: Date.now() })
+        // 502 with the upstream reason beats a blank "服务器内部错误".
+        throw error.status ? error : new HttpError(502, `额度查询失败：${error.message}`, 'quota_unavailable')
+      }
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/quota/refresh') {
@@ -329,6 +359,11 @@ export function createProxyServer(config, {
         }
       }
       sendJson(response, 200, { ok: true, results, spend, points: [...quotaCache.values()].reduce((sum, item) => sum + (item.windows || []).reduce((n, w) => n + (typeof w.remaining === 'number' ? w.remaining : 0), 0), 0) })
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/accounts/probe') {
+      const results = await probeAll()
+      sendJson(response, 200, { ok: true, results })
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/logs') {
@@ -412,7 +447,13 @@ export function createProxyServer(config, {
       let usage
       let accountId = ''
       try {
-        const upstreamResponse = await runtime.pool.chat(body, route, { signal: controller.signal, configPath, onUsage: (value) => { usage = value } })
+        let firstTokenAt = 0
+        const upstreamResponse = await runtime.pool.chat(body, route, {
+          signal: controller.signal,
+          configPath,
+          onUsage: (value) => { usage = value },
+          onFirstToken: () => { if (!firstTokenAt) firstTokenAt = Date.now() },
+        })
         accountId = upstreamResponse.headers.get('x-xiaoyi-account') || ''
         response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers))
         if (upstreamResponse.body) {
@@ -422,7 +463,10 @@ export function createProxyServer(config, {
         }
         response.end()
         recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
-        requestLog.finish(requestId, { status: upstreamResponse.status, accountId, usage, rate: modelRate(body.model) })
+        requestLog.finish(requestId, {
+          status: upstreamResponse.status, accountId, usage, rate: modelRate(body.model),
+          marks: { firstByteAt: runtime.pool.lastFirstByteAt || null, firstTokenAt: firstTokenAt || null },
+        })
       } catch (error) {
         requestLog.finish(requestId, { status: error.status || (controller.signal.aborted ? 499 : 500), error: controller.signal.aborted && !response.writableEnded ? '客户端断开' : error.message })
         throw error
@@ -447,6 +491,8 @@ export function createProxyServer(config, {
       if (!error.status || status === 500) logger.error(`[proxy] ${error.stack || error}`)
     }
   })
+  startProbing()
+  server.on('close', () => { clearInterval(probeTimer); oauth.close?.() })
   server.requestTimeout = 0 // Streaming lifetime is controlled by the upstream AbortController.
   server.headersTimeout = 60000
   server.keepAliveTimeout = 5000

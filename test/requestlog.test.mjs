@@ -69,8 +69,8 @@ test('breakdown aggregates per model and per hour', () => {
   assert.equal(byHour.reduce((sum, hour) => sum + hour.requests, 0), 2)
 })
 
-test('empty in-memory buffer never truncates a non-empty log file', async () => {
-  const { mkdtemp, writeFile, stat } = await import('node:fs/promises')
+test('flushing appends and never truncates existing records', async () => {
+  const { mkdtemp, writeFile, readFile } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-log-guard-'))
@@ -79,10 +79,27 @@ test('empty in-memory buffer never truncates a non-empty log file', async () => 
   const logPath = join(dir, 'requests.jsonl')
   await writeFile(logPath, `${JSON.stringify({ id: 'kept', at: Date.now(), status: 200, ms: 5 })}\n`)
   const log = new RequestLog({ configPath })
-  const before = (await stat(logPath)).size
-  // Simulate a rewrite triggered while the in-memory buffer is empty.
-  log.entries = []
   log.flushNow()
-  const after = (await stat(logPath)).size
-  assert.equal(after, before, 'file must not be truncated when buffer is empty')
+  const lines = (await readFile(logPath, 'utf8')).split('\n').filter(Boolean)
+  assert.equal(lines.length, 2, 'old record kept, new record appended')
+  assert.equal(JSON.parse(lines[0]).id, 'kept')
+})
+
+test('reaching maxEntries rotates segments instead of rewriting the active file', async () => {
+  const { mkdtemp, writeFile, readdir, stat } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-log-rotate-'))
+  const configPath = join(dir, 'config.json')
+  await writeFile(configPath, '{}\n')
+  // Tiny segment so rotation happens quickly.
+  const log = new RequestLog({ configPath, maxEntries: 50, segmentBytes: 256 * 1024 })
+  for (let i = 0; i < 400; i++) push(log, i)
+  const files = (await readdir(dir)).filter((name) => name.startsWith('requests.jsonl'))
+  assert.ok(files.length >= 1)
+  const total = files.reduce(async (acc, name) => (await acc) + (await stat(join(dir, name))).size, Promise.resolve(0))
+  assert.ok((await total) > 0, 'records were persisted')
+  // Memory stays capped regardless of how many records were written.
+  assert.equal(log.entries.length <= 50, true)
+  assert.equal(log.page({ page: 1, pageSize: 50 }).total <= 50, true)
 })

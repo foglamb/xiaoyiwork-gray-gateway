@@ -42,16 +42,21 @@ export function patchChunk(value, modelHint) {
  * Preserve complete SSE blocks (including comments), remove its numeric id lines,
  * normalize OpenAI chunk fields, and terminate exactly once with data: [DONE].
  */
-export function transformSse(upstream, modelHint, { signal, onFrame, onUsage } = {}) {
+export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken } = {}) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
   let terminated = false
   let outputClosed = false
   let reader
+  let lastWrite = 0
+  let firstTokenSeen = false
 
   const enqueue = (controller, text) => {
-    if (!outputClosed && text) controller.enqueue(encoder.encode(text))
+    if (!outputClosed && text) {
+      lastWrite = Date.now()
+      controller.enqueue(encoder.encode(text))
+    }
   }
   const close = (controller) => {
     if (!outputClosed) {
@@ -79,6 +84,12 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage } =
     const text = parsed
       ? `data: ${JSON.stringify(patchChunk(parsed, modelHint))}\n\n`
       : `${lines.join('\n')}\n\n`
+    const choice = parsed?.choices?.[0]
+    const delta = choice?.delta || {}
+    if (!firstTokenSeen && (delta.content || delta.reasoning_content || delta.tool_calls)) {
+      firstTokenSeen = true
+      onFirstToken?.()
+    }
     onFrame?.(parsed)
     if (parsed?.usage) onUsage?.(parsed.usage)
     return text
@@ -96,7 +107,28 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage } =
       signal?.addEventListener('abort', abort, { once: true })
       try {
         for (;;) {
-          const { value, done } = await reader.read()
+          // Race the upstream read against a heartbeat interval so a thinking model
+          // that stays silent for 10-30s does not look like a dead connection.
+          // Keep a single in-flight read across heartbeat ticks: dropping it would
+          // silently swallow the chunk that resolves later.
+          let readPromise = reader.read()
+          let result
+          for (;;) {
+            let timer
+            const beat = new Promise((resolve) => {
+              timer = setTimeout(() => resolve('__beat__'), heartbeatMs)
+              timer.unref?.()
+            })
+            const raced = await Promise.race([readPromise.then((value) => ({ value })), beat])
+            clearTimeout(timer)
+            if (raced === '__beat__') {
+              if (Date.now() - lastWrite >= heartbeatMs) enqueue(controller, ': keepalive\n\n')
+              continue
+            }
+            result = raced.value
+            break
+          }
+          const { value, done } = result
           if (done) break
           buffer += decoder.decode(value, { stream: true })
           let end
@@ -139,8 +171,8 @@ function findEventBoundary(buffer) {
   return match ? { index: match.index, length: match[0].length } : null
 }
 
-export async function aggregateSse(upstream, modelHint, { signal, onUsage } = {}) {
-  const text = await new Response(transformSse(upstream, modelHint, { signal })).text()
+export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFirstToken } = {}) {
+  const text = await new Response(transformSse(upstream, modelHint, { signal, onFirstToken, heartbeatMs: 0 })).text()
   const message = { role: 'assistant', content: '' }
   let reasoning = ''
   const toolCalls = new Map()

@@ -48,13 +48,34 @@ function openBrowser(url) {
   else if (process.platform === 'darwin') execFile('open', [url], () => {})
   else execFile('xdg-open', [url], () => {})
 }
+// Last-resort guards: log the fault but keep the gateway serving. A single bad
+// request must not take down every client connection.
+let fatalCount = 0
+const reportFatal = (kind) => (error) => {
+  fatalCount++
+  const at = new Date().toISOString()
+  console.error(`[fatal] ${at} ${kind} #${fatalCount}: ${error?.stack || error?.message || error}`)
+  // Repeated failures usually mean a real bug; exit so a supervisor can restart.
+  if (fatalCount >= 50) {
+    console.error('[fatal] too many uncaught errors, exiting so the supervisor can restart')
+    process.exit(1)
+  }
+}
+process.on('uncaughtException', reportFatal('uncaughtException'))
+process.on('unhandledRejection', reportFatal('unhandledRejection'))
+
 let stopping = false
-const shutdown = () => {
+const shutdown = (signal) => {
   if (stopping) return
   stopping = true
-  console.log('\n正在退出…')
+  console.log(`\n收到 ${signal || 'SIGTERM'}，正在优雅退出…`)
+  // Stop accepting new connections, let in-flight streams finish, then exit.
   server.close(() => process.exit(0))
-  setTimeout(() => { server.closeAllConnections?.(); process.exit(0) }, 3000).unref()
+  setTimeout(() => {
+    console.warn('[shutdown] 3 秒内未完成，强制关闭连接')
+    server.closeAllConnections?.()
+    process.exit(0)
+  }, 3000).unref()
 }
-process.once('SIGTERM', shutdown)
-process.once('SIGINT', shutdown)
+process.once('SIGTERM', () => shutdown('SIGTERM'))
+process.once('SIGINT', () => shutdown('SIGINT'))

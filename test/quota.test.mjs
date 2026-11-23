@@ -90,3 +90,66 @@ test('per-request model points are recorded and exposed', async (t) => {
   const account = state.accounts.find((item) => item.id === 'stable-A')
   assert.equal(account.spentPoints, undefined, 'no estimated spend exposed')
 })
+
+test('quota survives one upstream blip and returns partial data instead of 500', async () => {
+  const config = fixture()
+  const account = config.accounts.stable[0]
+  let calls = 0
+  const fetchImpl = async (url, init) => {
+    if (!url.includes('privilege/query')) return new Response('{}', { status: 200 })
+    calls++
+    const body = JSON.parse(init.body)
+    // The member-points call fails on the first attempt, succeeds on retry.
+    if (body.agentId === '1') {
+      if (calls <= 1) throw new TypeError('fetch failed')
+      return Response.json({ celiaPremiumPrivilege: { membership: { skuGroupName: '体验版' }, aiPoints: { totalPoints: 200 } } })
+    }
+    return Response.json({ privilegeList: [] })
+  }
+  const { AccountPool } = await import('../src/pool.mjs')
+  const pool = new AccountPool(config, { fetchImpl, logger: { log() {} } })
+  const quota = await pool.quota(account)
+  assert.equal(quota.windows[0].remaining, 200)
+  assert.ok(calls >= 2, 'retried after the transient error')
+})
+
+test('quota reports a clear 502 (not 500) when both upstream calls fail', async () => {
+  const config = fixture()
+  const account = config.accounts.stable[0]
+  const fetchImpl = async (url) => {
+    if (!url.includes('privilege/query')) return new Response('{}', { status: 200 })
+    throw new TypeError('fetch failed')
+  }
+  const { AccountPool } = await import('../src/pool.mjs')
+  const pool = new AccountPool(config, { fetchImpl, logger: { log() {} } })
+  await assert.rejects(() => pool.quota(account), (error) => {
+    assert.equal(error.status, 502)
+    assert.equal(error.code, 'quota_unavailable')
+    assert.match(error.message, /上游连接失败/)
+    return true
+  })
+})
+
+test('quota endpoint returns the upstream reason rather than a generic 500', async (t) => {
+  const { createProxyServer } = await import('../src/server.mjs')
+  const { once } = await import('node:events')
+  const config = fixture()
+  const fetchImpl = async (url) => {
+    if (!url.includes('privilege/query')) return new Response('{}', { status: 200 })
+    throw new TypeError('fetch failed')
+  }
+  const server = createProxyServer(config, { fetchImpl, persistConfig: async () => {} })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(async () => { server.closeAllConnections?.(); await new Promise((r) => server.close(r)) })
+  const base = `http://127.0.0.1:${server.address().port}`
+  const res = await fetch(`${base}/api/accounts/stable-A/quota`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.adminKey}`, 'content-type': 'application/json' },
+    body: '{}',
+  })
+  const body = await res.json()
+  assert.equal(res.status, 502)
+  assert.notEqual(body.error.type, 'server_error')
+  assert.match(body.error.message, /额度查询失败|上游连接失败/)
+})
