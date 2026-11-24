@@ -230,8 +230,12 @@ Cookie 过期。任何目录故障都不影响聊天、灰度或余额接口。
 ### 运行调优（设置页）
 
 `POST /api/settings` 支持热更新：`requestTimeoutMs`、`maxBodyBytes`、`allowPanelFromLan`、
-`accountProbeMinutes`、`streamHeartbeatMs`、`logMaxEntries`、`grayModels`。
-`port` / `listen` / `upstreamUrl` 修改后需重启。
+`accountProbeMinutes`、`streamHeartbeatMs`、`logMaxEntries`、`grayModels`，以及模型区的
+`modelCatalogMinutes`、`kimiCompatibility`、`normalizeToolSchemas`、`upstreamErrorFastFail`、
+`upstreamBodyLimitBytes`。
+探活/目录定时器会立即重建，0 会真正停止；心跳 0 真正关闭 keepalive；
+`logMaxEntries` 立即调整内存分页缓存，不裁减磁盘统计。网关接收上限与上游 4.5 MiB
+上限分别生效，后者超过时返回标准 413。`port` / `listen` / `upstreamUrl` 修改后需重启。
 
 ## 稳定性与可观测
 
@@ -240,7 +244,7 @@ Cookie 过期。任何目录故障都不影响聊天、灰度或余额接口。
 | 日志滚动 | 追加写 + 按 4MB 滚动分片，最多保留 3 个分片；**永不整体重写**，不再阻塞流式响应 |
 | 流式心跳 | 上游静默超过 `streamHeartbeatMs`（默认 15s）注入 `: keepalive` 注释帧，避免中间层断连 |
 | 延迟三段 | 记录 `firstByteMs`（首字节）、`ttftMs`（首 token）、`ms`（总耗时），面板请求表可查 |
-| 账号探测 | `accountProbeMinutes > 0` 时定时用额度接口做轻量探活，不消耗模型额度；失败自动冷却并在面板标红 |
+| 账号探测 | `accountProbeMinutes > 0` 时定时用凭据签发接口做探活，不消耗模型额度；失败自动冷却并在面板标红 |
 | 手动探测 | `POST /api/accounts/probe`，面板账号卡「检测」按钮 |
 | 异常兜底 | `uncaughtException` / `unhandledRejection` 记录后继续服务，连续 50 次才退出交给守护进程重启 |
 | 优雅退出 | SIGTERM/SIGINT 停止接新连接，等待在途请求，3 秒后强制关闭 |
@@ -402,14 +406,14 @@ Windows 注册表，故建议使用独立的灰度账号。
 
 ## 验证范围
 
-`npm test` 共 **72 项**，使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
+`npm test` 共 **75 项**，使用本机临时 HTTP 服务器和合成 SSE，不消耗真实账号点数：
 稳定分桶、灰度边界、Header/Cookie 优先级、灰度模型拒绝、鉴权、SSE 分包、
 `[DONE]`、工具调用聚合、池路由、配置脱敏/热更新、401 续期重试、面板静态资源、
 账号增删、积分查询、密钥保护、日志元数据与远端面板来源限制；
 另覆盖 OAuth PKCE 参数、state 不匹配/过期、回调地址校验、同 UID 重登替换与跨池重复拒绝、
 日志分页上限与环形缓冲、缓存/推理字段落库、空缓冲不截断日志文件；
 另覆盖 HAG 模型目录、Kimi 参数与工具 Schema 归一化、4.5 MiB 413 保护、
-SSE 错帧早断和非流式 502 错误透传。
+SSE 错帧早断和非流式 502 错误透传；另验证设置热更新、日志缓存调整和心跳 0。
 
 另使用本机 Chromium 150 对合成账号实例做过浏览器验收：登录、25% 灰度热更新、
 账号/模型卡片、添加账号弹窗、深浅主题、移动端 390px 布局均通过，浏览器无 JS 异常。
