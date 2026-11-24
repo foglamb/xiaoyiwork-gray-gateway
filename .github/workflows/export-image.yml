@@ -1,7 +1,8 @@
 name: export-image
 
-# Export the published image as a downloadable Docker archive. This does not
-# rebuild or republish the application; it packages the exact GHCR digest.
+# Export the published image as a downloadable Docker archive. Pull the exact
+# per-platform manifest (not the multi-arch index), otherwise docker save may
+# look for the other architecture and emit an empty archive.
 on:
   push:
     paths:
@@ -18,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [amd64, arm64]
+        include:
+          - platform: amd64
+            digest: sha256:275aef350e33316b109da3bb7366dc6963f3d4f371dfce128457706ebfac3c30
+          - platform: arm64
+            digest: sha256:dcf510aa38ed8af09276b0914a4ddbfc85e9991c7438b0ed02cd5eac1db2173f
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -27,26 +32,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull the published image
+      - name: Pull the platform manifest
         run: |
-          set -eu
+          set -euo pipefail
           docker pull --platform "linux/${{ matrix.platform }}" \
-            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52"
+            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@${{ matrix.digest }}"
           docker tag \
-            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52" \
+            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@${{ matrix.digest }}" \
             "ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5"
 
-      - name: Export Docker archive
+      - name: Export and validate Docker archive
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p output
           docker save "ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5" \
             | gzip -1 > "output/xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz"
+          gzip -t "output/xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz"
+          tar -tzf "output/xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz" \
+            | grep -q 'manifest.json'
+          test "$(stat -c%s "output/xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz")" -gt 1000000
           {
             echo 'Image: ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5'
             echo 'Source commit: c1e8bf54882a74f7fa2bf2139be6faffe206adff'
             echo 'Multi-arch digest: sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52'
             echo "Platform: linux/${{ matrix.platform }}"
+            echo "Platform manifest: ${{ matrix.digest }}"
             echo
             echo 'Load:'
             echo "  docker load < xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz"
