@@ -1,0 +1,73 @@
+name: export-image
+
+# Export the published image as a downloadable Docker archive. This does not
+# rebuild or republish the application; it packages the exact GHCR digest.
+on:
+  push:
+    paths:
+      - '.github/workflows/export-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the published image
+        run: |
+          set -eu
+          docker pull --platform "linux/${{ matrix.platform }}" \
+            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52"
+          docker tag \
+            "ghcr.io/foglamb/xiaoyiwork-gray-gateway@sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52" \
+            "ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5"
+
+      - name: Export Docker archive
+        run: |
+          set -eu
+          mkdir -p output
+          docker save "ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5" \
+            | gzip -1 > "output/xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz"
+          {
+            echo 'Image: ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5'
+            echo 'Source commit: c1e8bf54882a74f7fa2bf2139be6faffe206adff'
+            echo 'Multi-arch digest: sha256:95eac7d6ef984c9c1a489579588d41aaf000b8dfdb1acbdc7ae79d48b2d12f52'
+            echo "Platform: linux/${{ matrix.platform }}"
+            echo
+            echo 'Load:'
+            echo "  docker load < xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}.tar.gz"
+            echo
+            echo 'Run:'
+            echo '  docker run -d --name xiaoyiwork-gateway --restart unless-stopped \'
+            echo '    -p 127.0.0.1:17356:17356 \'
+            echo "    -e XIAOYI_API_KEY='replace-with-a-client-key-at-least-16-chars' \"
+            echo "    -e XIAOYI_ADMIN_KEY='replace-with-a-different-admin-key' \"
+            echo '    -v xiaoyi-config:/app/config \'
+            echo '    ghcr.io/foglamb/xiaoyiwork-gray-gateway:sha-c1e8bf5'
+            echo
+            echo 'Check: curl http://127.0.0.1:17356/healthz'
+          } > output/README.txt
+          sha256sum output/*.tar.gz > output/SHA256SUMS.txt
+          ls -lh output
+
+      - name: Upload image archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaoyiwork-gray-gateway-linux-${{ matrix.platform }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
