@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { createProxyServer } from '../src/server.mjs'
 import { OAuthManager, OAUTH, oauthCallbackHtml } from '../src/oauth.mjs'
@@ -163,4 +164,11 @@ test('callback page escapes error text', () => {
   const html = oauthCallbackHtml(false, '<script>alert(1)</script>')
   assert.doesNotMatch(html, /<script>alert/)
   assert.match(html, /&lt;script&gt;/)
+})
+
+test('manual callback UI sends callbackUrl/state and then saves through status polling', async () => {
+  const source = await readFile(new URL('../panel-ui/src/components/LoginDialog.vue', import.meta.url), 'utf8')
+  assert.match(source, /body: \{ state: session\.value\?\.state, callbackUrl: value \}/)
+  assert.doesNotMatch(source, /JSON\.stringify\(\{ url: value \}\)/)
+  assert.match(source, /if \(result\.status === 'success'\) \{[\s\S]*?await poll\(\)/)
 })

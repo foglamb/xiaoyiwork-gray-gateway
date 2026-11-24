@@ -54,10 +54,19 @@ async function submitCallback() {
   status.value = 'completing'
   message.value = ''
   try {
-    const result = await api('/api/auth/oauth/complete', { method: 'POST', body: JSON.stringify({ url: value }) })
-    stop()
-    notify(`账号 ${result.account?.id || ''} ${result.account?.replaced ? '已替换原凭据' : `已加入${poolLabel.value}`}`, 'ok')
-    emit('done')
+    const result = await api('/api/auth/oauth/complete', {
+      method: 'POST',
+      body: { state: session.value?.state, callbackUrl: value },
+    })
+    if (result.status === 'success') {
+      // /complete exchanges the code; /status performs the one-time account
+      // save. Keep that second step instead of closing before persistence.
+      status.value = 'waiting'
+      await poll()
+    } else {
+      status.value = 'waiting'
+      message.value = result.message || '授权处理中…'
+    }
   } catch (error) {
     status.value = 'waiting'
     message.value = error.message
