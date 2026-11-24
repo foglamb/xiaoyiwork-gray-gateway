@@ -10,7 +10,7 @@ import LogsView from './components/LogsView.vue'
 import SettingsView from './components/SettingsView.vue'
 import ToastStack from './components/ToastStack.vue'
 import { api, adminKey, setAdminKey } from './composables/useApi.js'
-import { state, loading, refreshAll } from './composables/useDashboard.js'
+import { state, loading, refreshAll, windowHours } from './composables/useDashboard.js'
 import { usePolling } from './composables/usePolling.js'
 import { notify } from './composables/useToast.js'
 
@@ -34,7 +34,7 @@ const healthy = computed(() => {
   return accounts.some((a) => !a.cooling && a.health?.ok !== false)
 })
 
-const poller = usePolling(() => refreshAll({ page: 1, pageSize: 50, hours: 24 }), { intervalMs: 20000, enabled: false })
+const poller = usePolling(() => refreshAll({ page: 1, pageSize: 50, hours: windowHours.value }), { intervalMs: 20000, enabled: false })
 
 async function boot() {
   if (!adminKey.value) { ready.value = true; return }

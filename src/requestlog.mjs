@@ -192,8 +192,9 @@ export class RequestLog {
     return out
   }
 
-  stats() {
-    const cutoff = Date.now() - 86400000
+  stats(hours = 24) {
+    const windowHours = Math.max(1, Math.min(Number(hours) || 24, 168))
+    const cutoff = Date.now() - windowHours * 3600000
     const source = this.#allEntries()
     const day = source.filter((entry) => entry.at >= cutoff)
     const completed = day.filter((entry) => entry.ms !== null)

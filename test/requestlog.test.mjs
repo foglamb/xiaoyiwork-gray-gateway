@@ -135,3 +135,32 @@ test('24h totals cover records evicted from the in-memory ring', async () => {
   const charted = byHour.reduce((acc, b) => acc + b.total, 0)
   assert.equal(charted, stats.tokens24h, 'chart aggregate equals KPI total')
 })
+
+test('stats honours the requested window instead of always using 24h', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-log-window-'))
+  const configPath = join(dir, 'config.json')
+  await writeFile(configPath, '{}\n')
+
+  const now = Date.now()
+  // One request 10h ago, one 30h ago, one 60h ago.
+  const rows = [
+    { id: 'a', at: now - 10 * 3600000, status: 200, ms: 10, promptTokens: 100, completionTokens: 0, totalTokens: 100, cachedTokens: 0, reasoningTokens: 0 },
+    { id: 'b', at: now - 30 * 3600000, status: 200, ms: 10, promptTokens: 200, completionTokens: 0, totalTokens: 200, cachedTokens: 0, reasoningTokens: 0 },
+    { id: 'c', at: now - 60 * 3600000, status: 200, ms: 10, promptTokens: 400, completionTokens: 0, totalTokens: 400, cachedTokens: 0, reasoningTokens: 0 },
+  ]
+  await writeFile(join(dir, 'requests.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const log = new RequestLog({ configPath, maxEntries: 100 })
+  assert.equal(log.stats(24).tokens24h, 100, '24h covers only the 10h record')
+  assert.equal(log.stats(6).tokens24h, 0, '6h covers none of them')
+  assert.equal(log.stats(72).tokens24h, 700, '72h covers all three')
+
+  // The chart for the same window must agree with the KPI for that window.
+  for (const hours of [6, 24, 72]) {
+    const charted = log.breakdown(hours).byHour.reduce((acc, b) => acc + b.total, 0)
+    assert.equal(charted, log.stats(hours).tokens24h, `chart matches KPI for ${hours}h`)
+  }
+})

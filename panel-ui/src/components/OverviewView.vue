@@ -4,11 +4,27 @@ import LineChart from './LineChart.vue'
 import StatCard from './StatCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import AppIcon from './AppIcon.vue'
-import { state, logStats, hourly, byModel, bucketMs, accounts } from '../composables/useDashboard.js'
+import { state, logStats, hourly, byModel, bucketMs, accounts, windowHours, loadLogs } from '../composables/useDashboard.js'
 import { compact, exact, num, pct, ms } from '../composables/useFormat.js'
+import { notify } from '../composables/useToast.js'
 
 const metric = shallowRef('tokens')
-const hours = shallowRef(24)
+const hours = windowHours
+const switching = shallowRef(false)
+
+/** Changing the range refetches the window; the chart and KPIs both follow it. */
+async function setHours(value) {
+  if (value === hours.value) return
+  hours.value = value
+  switching.value = true
+  try {
+    await loadLogs({ page: 1, pageSize: 50, hours: value })
+  } catch (error) {
+    notify(error.message, 'err')
+  } finally {
+    switching.value = false
+  }
+}
 
 const METRICS = {
   tokens: [
@@ -74,7 +90,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
     </section>
 
     <section class="stats">
-      <StatCard label="近 24 小时请求" :value="num(logStats.last24h || 0)" :hint="`成功率 ${pct(logStats.successRate)}`" icon="pulse" />
+      <StatCard :label="`近 ${hours} 小时请求`" :value="num(logStats.last24h || 0)" :hint="`成功率 ${pct(logStats.successRate)}`" icon="pulse" />
       <StatCard label="缓存命中率" :value="pct(logStats.cacheHitRate)" hint="命中 / 输入 Token" tone="ok" icon="spark" />
       <StatCard
         label="总 Token" :value="compact(logStats.tokens24h || 0)"
@@ -103,7 +119,10 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
             </button>
           </div>
           <div class="seg">
-            <button v-for="h in [6, 24, 72]" :key="h" type="button" :class="{ on: hours === h }" @click="hours = h">{{ h }}h</button>
+            <button
+              v-for="h in [6, 24, 72]" :key="h" type="button"
+              :class="{ on: hours === h }" :disabled="switching" @click="setHours(h)"
+            >{{ h }}h</button>
           </div>
         </div>
       </header>
@@ -156,7 +175,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
             <h3>模型消耗</h3>
           </div>
           <span class="grow" />
-          <span class="muted tiny">近 24 小时</span>
+          <span class="muted tiny">近 {{ hours }} 小时</span>
         </header>
         <div class="table-wrap">
           <table>

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, shallowRef, watch } from 'vue'
-import { logs, logStats, refreshAll, loadLogs } from '../composables/useDashboard.js'
+import { logs, logStats, refreshAll, loadLogs, windowHours } from '../composables/useDashboard.js'
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 import AppIcon from './AppIcon.vue'
@@ -20,7 +20,9 @@ const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 async function load() {
   busy.value = true
   try {
-    const data = await loadLogs({ page: page.value, pageSize: PAGE_SIZE, hours: 24 })
+    // Follow the shared window so switching ranges on the overview keeps the
+    // numbers consistent when coming back to this page.
+    const data = await loadLogs({ page: page.value, pageSize: PAGE_SIZE, hours: windowHours.value })
     total.value = data.total || 0
   } catch (error) {
     notify(error.message, 'err')

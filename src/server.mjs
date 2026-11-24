@@ -381,7 +381,12 @@ export function createProxyServer(config, {
     if (request.method === 'GET' && url.pathname === '/api/logs') {
       const page = requestLog.page({ page: url.searchParams.get('page'), pageSize: url.searchParams.get('pageSize') })
       const hours = url.searchParams.get('hours')
-      sendJson(response, 200, { ...page, stats: requestLog.stats(), breakdown: requestLog.breakdown(hours) })
+      sendJson(response, 200, {
+        ...page,
+        stats: requestLog.stats(hours),
+        breakdown: requestLog.breakdown(hours),
+        windowHours: Math.max(1, Math.min(Number(hours) || 24, 168)),
+      })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/logs/clear') {

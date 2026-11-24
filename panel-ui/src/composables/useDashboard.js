@@ -6,6 +6,9 @@ export const state = ref(null)
 export const logData = ref(null)
 export const loading = shallowRef(false)
 export const lastError = shallowRef('')
+// Time window is shared state: the chart range buttons drive the request, so
+// polling and manual refresh must read it instead of hard-coding 24.
+export const windowHours = ref(24)
 
 const quotaInflight = new Set()
 let controllers = []
@@ -23,12 +26,14 @@ export async function loadState() {
   return state.value
 }
 
-export async function loadLogs({ page = 1, pageSize = 50, hours = 24 } = {}) {
-  logData.value = await api(`/api/logs?page=${page}&pageSize=${pageSize}&hours=${hours}`)
-  return logData.value
+export async function loadLogs({ page = 1, pageSize = 50, hours = windowHours.value } = {}) {
+  const data = await api(`/api/logs?page=${page}&pageSize=${pageSize}&hours=${hours}`)
+  // Ignore a slow response that belongs to a window the user already left.
+  if (hours === windowHours.value || hours === undefined) logData.value = data
+  return data
 }
 
-export async function refreshAll({ page = 1, pageSize = 50, hours = 24 } = {}) {
+export async function refreshAll({ page = 1, pageSize = 50, hours = windowHours.value } = {}) {
   loading.value = true
   try {
     const [a, b] = await Promise.allSettled([loadState(), loadLogs({ page, pageSize, hours })])
