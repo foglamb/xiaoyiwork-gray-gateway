@@ -25,13 +25,15 @@ RUN apk add --no-cache tini
 
 COPY package.json ./
 COPY src ./src
-# Overwrite the checked-in bundle with the one just built from source.
+# Replace the checked-in bundle with the one built above. Removing first means a
+# file dropped from the build cannot linger in the layer.
+RUN rm -rf ./src/panel
 COPY --from=panel /panel/dist ./src/panel
 COPY config/config.example.json ./config/config.example.json
 COPY docker/entrypoint.sh /usr/local/bin/xiaoyi-entrypoint
 
 RUN chmod 0555 /usr/local/bin/xiaoyi-entrypoint \
- && mkdir -p /app/config /app/data \
+ && mkdir -p /app/config \
  && chown -R node:node /app
 
 USER node

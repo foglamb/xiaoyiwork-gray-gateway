@@ -5,9 +5,9 @@ name: docker
 #
 # Tags produced:
 #   latest            default branch
-#   edge              default branch, every push (same commit as latest)
-#   v2.0.0 / 2.0      git tag pushes
-#   sha-<short>       every build, for pinning
+#   main              default branch
+#   v2.0.0 / 2.0      git tag pushes (semver)
+#   sha-<short>       every build, for pinning to a commit
 on:
   push:
     branches: [main]
@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: '24'
       - name: Install panel deps
-        run: npm ci
+        run: npm ci --no-audit --no-fund
         working-directory: panel-ui
       - name: Build panel
         run: npm run build
@@ -50,15 +50,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
-    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+        include:
+          # Native on the default runner: fastest, always available.
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            qemu: false
+          # Emulated: slower but does not depend on arm runner availability,
+          # which is still restricted for private repositories.
+          - platform: linux/arm64
+            runner: ubuntu-latest
+            qemu: true
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
 
@@ -144,9 +155,14 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "${DOCKER_METADATA_OUTPUT_JSON}") \
-            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+          set -eu
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          sources=""
+          for digest in *; do
+            sources="$sources ${REGISTRY}/${IMAGE_NAME}@sha256:${digest}"
+          done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $sources
 
       - name: Inspect
         run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
