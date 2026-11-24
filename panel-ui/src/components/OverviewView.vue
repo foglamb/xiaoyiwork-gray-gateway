@@ -10,6 +10,7 @@ import { compact, exact, num, pct, ms } from '../composables/useFormat.js'
 import { notify } from '../composables/useToast.js'
 
 const metric = shallowRef('tokens')
+const modelNames = computed(() => Object.fromEntries((state.value?.models || []).map((model) => [model.id, model.name || model.id])))
 const hours = windowHours
 const switching = shallowRef(false)
 
@@ -150,10 +151,9 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
       </div>
     </section>
 
-    <section class="two-col">
-      <TokenBars :rows="byModel" />
+    <TokenBars :rows="byModel" :model-names="modelNames" />
 
-      <div class="card models-card">
+    <section class="card models-card">
         <header class="mini-head row">
           <div>
             <span class="kicker">Per Model</span>
@@ -179,7 +179,6 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
             </tbody>
           </table>
         </div>
-      </div>
     </section>
   </div>
 </template>

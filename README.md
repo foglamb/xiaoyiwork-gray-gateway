@@ -134,7 +134,7 @@ Compose 默认只映射 `127.0.0.1:17356`；要局域网访问改成 `"17356:173
 - 缓存命中来自 `usage.prompt_tokens_details.cached_tokens`，命中率 = 命中 / 输入；
 - 推理 Token 来自 `usage.completion_tokens_details.reasoning_tokens`；
 - 趋势图为 SVG 折线图，服务端按窗口与数据密度分桶；72h 保留完整 72 小时时间轴，不裁掉前置空窗；
-- 模型总量图使用竖向堆叠柱，柱高按当前窗口最大模型等比，分段展示缓存、未命中输入与输出；
+- 模型总量图使用全宽竖向堆叠柱，带坐标网格、真实等比柱高、上游模型名称、图例汇总及悬停/聚焦/点击精确读数；
 - 日志**分页**：默认每页 20 条，可选 10/20/50/100，内存与磁盘保留上限 `logMaxEntries`（默认 1000，钳制 50–5000）；
 - 自动刷新 15 秒，可关闭，页面隐藏时停止，数据未变化不重绘表格。
 
@@ -155,7 +155,7 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 | 项 | 说明 |
 |---|---|
 | 技术栈 | Vue 3.5 + Vite 7，Composition API，无 UI 框架依赖 |
-| 产物 | `app.js` ≈153KB（gzip 56KB）+ `app.css` ≈50KB（gzip 10KB），单文件 |
+| 产物 | `app.js` ≈160KB（gzip 59KB）+ `app.css` ≈54KB（gzip 10.5KB），单文件 |
 | CSP | 仍为 `script-src 'self'`，产物无 `eval` / `new Function` / 内联脚本 |
 | 页面 | 总览、灰度控制台、账号池、模型、请求记录、设置 |
 | 图表 | SVG 折线图 + CSS 竖向堆叠柱图，悬停读数、6h/24h/72h 与指标切换 |
