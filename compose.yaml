@@ -1,12 +1,44 @@
+# Two ways to run this.
+#
+#   A. From the published image (recommended)
+#        echo 'XIAOYI_IMAGE=ghcr.io/foglamb/xiaoyiwork-gray-gateway:latest' >> .env
+#        docker compose up -d
+#
+#   B. Build locally from source
+#        docker compose up -d --build
+#      (leave XIAOYI_IMAGE empty so compose builds instead of pulling)
+#
+# Either way, put your settings in .env first, or mount an existing config
+# directory at /app/config and the entrypoint will leave it untouched.
+
 services:
   xiaoyiwork-proxy:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Empty by default so `docker compose up --build` builds locally.
+    # Set XIAOYI_IMAGE in .env to pull the published image instead.
+    image: ${XIAOYI_IMAGE:-}
     restart: unless-stopped
     ports:
+      # Bind to loopback by default. Change to "17356:17356" to expose on the LAN.
       - "127.0.0.1:17356:17356"
+    environment:
+      # First-run bootstrap. Ignored when a config file already exists, so it is
+      # safe to keep these in .env and still mount a managed config later.
+      XIAOYI_API_KEY: ${XIAOYI_API_KEY:-}
+      XIAOYI_ADMIN_KEY: ${XIAOYI_ADMIN_KEY:-}
+      XIAOYI_GRAY_SALT: ${XIAOYI_GRAY_SALT:-}
+      XIAOYI_ACCOUNTS: ${XIAOYI_ACCOUNTS:-[]}
+      XIAOYI_ACCOUNT_POOL: ${XIAOYI_ACCOUNT_POOL:-gray}
+      XIAOYI_GRAY_PERCENTAGE: ${XIAOYI_GRAY_PERCENTAGE:-}
+      XIAOYI_ALLOW_PANEL_LAN: ${XIAOYI_ALLOW_PANEL_LAN:-1}
+      PORT: ${PORT:-17356}
     volumes:
-      # Mount the directory: credential renewal writes a temporary file then renames it.
-      - ./config:/app/config:rw
+      # A named volume survives container recreation without needing a host path.
+      # Replace with a bind mount if you want to edit config.json directly:
+      #   - ./config:/app/config
+      - xiaoyi-config:/app/config
     read_only: true
     tmpfs:
       - /tmp
@@ -14,3 +46,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  xiaoyi-config:

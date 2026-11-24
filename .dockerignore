@@ -1,0 +1,17 @@
+.git
+.gitignore
+artifacts
+panel-ui/node_modules
+panel-ui/dist
+test
+config/config.json
+config/*.tmp
+config/requests.jsonl
+config/requests.jsonl.*
+*.log
+*.tgz
+.env
+.DS_Store
+README.md
+LICENSE
+UPSTREAM_NOTICE.md

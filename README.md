@@ -83,13 +83,46 @@ node src/cli.mjs --help
 
 ### Docker
 
+镜像在 GitHub Actions 里构建，多架构（amd64 / arm64），发布到 GHCR：
+
 ```bash
-docker compose up -d --build
+docker pull ghcr.io/foglamb/xiaoyiwork-gray-gateway:latest
+```
+
+**方式 A — 拉取现成镜像（推荐）**
+
+```bash
+cp .env.example .env
+# 填 XIAOYI_API_KEY / XIAOYI_ADMIN_KEY；账号可以留空，稍后在面板里用华为登录添加
+echo 'XIAOYI_IMAGE=ghcr.io/foglamb/xiaoyiwork-gray-gateway:latest' >> .env
+docker compose up -d
 curl http://127.0.0.1:17356/healthz
 ```
 
-Compose 默认只映射 `127.0.0.1:17356`。配置目录挂载可写，用于原子保存灰度设置、
-续期凭据与请求元数据。
+**方式 B — 本地从源码构建**
+
+```bash
+docker compose up -d --build
+```
+
+`.env` 中的 `XIAOYI_*` 只用于**首次启动**生成 `config.json`；若 `/app/config/config.json`
+已存在（bind mount 或命名卷），入口脚本会原样保留，不覆盖你的配置。
+
+| 变量 | 说明 |
+|---|---|
+| `XIAOYI_API_KEY` | 客户端密钥，≥16 字符 |
+| `XIAOYI_ADMIN_KEY` | 面板管理密钥，≥16 字符且不能与上面相同 |
+| `XIAOYI_ACCOUNTS` | 账号 JSON 数组，留 `[]` 则在面板里用 OAuth 添加 |
+| `XIAOYI_ACCOUNT_POOL` | 种子账号进哪个池，`gray`（默认）或 `stable` |
+| `XIAOYI_GRAY_SALT` | 分桶盐值，留空自动生成 64 位十六进制 |
+| `XIAOYI_GRAY_PERCENTAGE` | 灰度比例 0–100 |
+| `XIAOYI_ALLOW_PANEL_LAN` | `0` 则面板仅容器网络内可见 |
+
+Compose 默认只映射 `127.0.0.1:17356`；要局域网访问改成 `"17356:17356"` 并在
+配置里开启 `allowPanelFromLan`。容器以非 root 运行、根文件系统只读、`cap_drop: ALL`、
+`no-new-privileges`。配置目录挂载可写，用于原子保存灰度设置、续期凭据与请求元数据。
+
+镜像标签：`latest` 与 `edge`（默认分支）、`v2.0.0` / `2.0`（git tag）、`sha-<短哈希`（可固定到某次构建）。
 
 ## Token 用量与缓存
 
