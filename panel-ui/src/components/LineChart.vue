@@ -110,26 +110,54 @@ const grid = computed(() => [0, 0.25, 0.5, 0.75, 1].map((f) => ({
 
 const tickEvery = computed(() => Math.max(1, Math.ceil(visible.value.length / 7)))
 
+/**
+ * Freeze the hovered values into the snapshot. Reading them back from the live
+ * data later breaks as soon as polling replaces the array (index no longer
+ * matches a point), which used to throw during render and blank the chart.
+ */
 function onMove(event) {
   const list = visible.value
   if (!list.length || !svgEl.value) return
   const rect = svgEl.value.getBoundingClientRect()
-  const x = ((event.clientX - rect.left) / rect.width) * W
-  const ratio = Math.min(1, Math.max(0, (x - PAD.value.left) / plotW.value))
-  const index = list.length <= 1 ? 0 : Math.round(ratio * (list.length - 1))
-  hover.value = { index, point: list[index], pct: (xAt(index, list.length) / W.value) * 100 }
+  const pointerX = Number(event.clientX ?? event.touches?.[0]?.clientX)
+  if (!Number.isFinite(pointerX) || !rect.width) return
+  const x = ((pointerX - rect.left) / rect.width) * W.value
+  const ratio = (x - PAD.value.left) / plotW.value
+  if (!Number.isFinite(ratio)) return
+  const clamped = Math.min(1, Math.max(0, ratio))
+  const index = list.length <= 1 ? 0 : Math.round(clamped * (list.length - 1))
+  const point = list[index]
+  if (!point) return
+  hover.value = {
+    index,
+    at: point.at,
+    requests: point.requests,
+    pct: (xAt(index, list.length) / W.value) * 100,
+    values: props.series.map((line) => ({ key: line.key, raw: Number(point[line.key]) || 0 })),
+  }
 }
 
 const hoverRows = computed(() => {
-  if (!hover.value) return []
-  return props.series.map((line) => ({
-    label: line.label,
-    color: line.color,
-    value: props.yFormat === 'percent'
-      ? `${(Number(hover.value.point[line.key]) || 0).toFixed(1)}%`
-      : compact(hover.value.point[line.key]),
-  }))
+  const snap = hover.value
+  if (!snap) return []
+  return props.series.map((line) => {
+    const entry = snap.values.find((item) => item.key === line.key)
+    const raw = entry ? entry.raw : 0
+    return {
+      label: line.label,
+      color: line.color,
+      value: props.yFormat === 'percent' ? `${raw.toFixed(1)}%` : compact(raw),
+    }
+  })
 })
+
+/** y coordinate for a series in the frozen snapshot. */
+function hoverY(key) {
+  const snap = hover.value
+  if (!snap) return 0
+  const entry = snap.values.find((item) => item.key === key)
+  return yAt(entry ? entry.raw : 0)
+}
 </script>
 
 <template>
@@ -162,8 +190,8 @@ const hoverRows = computed(() => {
         <template v-if="hover">
           <line :x1="xAt(hover.index, visible.length)" :x2="xAt(hover.index, visible.length)" :y1="PAD.top" :y2="PAD.top + plotH" class="cursor" />
           <g v-for="line in series" :key="`h${line.key}`">
-            <circle :cx="xAt(hover.index, visible.length)" :cy="yAt(hover.point[line.key])" r="5.5" class="dot-halo" :fill="line.color" />
-            <circle :cx="xAt(hover.index, visible.length)" :cy="yAt(hover.point[line.key])" r="2.8" class="dot" :fill="line.color" />
+            <circle :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="5.5" class="dot-halo" :fill="line.color" />
+            <circle :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="2.8" class="dot" :fill="line.color" />
           </g>
         </template>
       </g>
@@ -178,12 +206,12 @@ const hoverRows = computed(() => {
     </svg>
 
     <div v-if="hover" class="tip" :style="{ left: `${hover.pct}%` }">
-      <div class="tip-time">{{ label(hover.point.at) }}</div>
+      <div class="tip-time">{{ label(hover.at) }}</div>
       <div v-for="row in hoverRows" :key="row.label" class="tip-row">
         <i :style="{ background: row.color }" /><span>{{ row.label }}</span><b>{{ row.value }}</b>
       </div>
-      <div v-if="hover.point.requests !== undefined" class="tip-row muted-row">
-        <span>请求</span><b>{{ hover.point.requests }}</b>
+      <div v-if="hover.requests !== undefined" class="tip-row muted-row">
+        <span>请求</span><b>{{ hover.requests }}</b>
       </div>
     </div>
 

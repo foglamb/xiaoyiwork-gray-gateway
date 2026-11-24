@@ -164,3 +164,16 @@ test('remote panel data requires explicit allowPanelFromLan even with spoofed fo
   assert.equal(panelAuthorized(request, { allowPanelFromLan: true }), true)
   assert.equal(panelAuthorized({ socket: { remoteAddress: '::ffff:127.0.0.1' } }, {}), true)
 })
+
+test('chart hover uses a frozen snapshot and cannot index live data', async () => {
+  const source = await readFile(new URL('../panel-ui/src/components/LineChart.vue', import.meta.url), 'utf8')
+  // Reading point values straight off the reactive data during render is what
+  // threw after polling replaced the array, unmounting the whole chart.
+  assert.doesNotMatch(source, /hover\.point\[/)
+  assert.doesNotMatch(source, /hover\.point\./)
+  // The snapshot carries precomputed series values instead.
+  assert.match(source, /values:\s*props\.series\.map/)
+  assert.match(source, /function hoverY/)
+  // Width is a computed ref now, so every use must read .value.
+  assert.doesNotMatch(source, /\*\s*W\b(?!\.value)/)
+})
