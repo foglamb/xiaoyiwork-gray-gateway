@@ -122,7 +122,7 @@ export function createProxyServer(config, {
 
   /** Periodic health probe: catches dead credentials before a user request does. */
   let probeTimer = null
-  const probeIntervalMs = Math.max(60000, Number(config.accountProbeMinutes || 15) * 60000)
+  let modelCatalogTimer = null
   async function probeAll() {
     const accounts = [...runtime.config.accounts.stable, ...runtime.config.accounts.gray]
     const results = []
@@ -134,13 +134,25 @@ export function createProxyServer(config, {
     return results
   }
   function startProbing() {
-    // Opt-in: probing performs real upstream calls, so it must be explicit.
-    // Set accountProbeMinutes (e.g. 15) to enable the scheduled health check.
-    if (!(Number(config.accountProbeMinutes) > 0)) return
     clearInterval(probeTimer)
+    probeTimer = null
+    // Opt-in: probing performs real upstream calls, so it must be explicit.
+    const minutes = Number(runtime.config.accountProbeMinutes ?? 0)
+    if (!(minutes > 0)) return
+    const intervalMs = Math.max(60000, minutes * 60000)
     probeAll().catch(() => {})
-    probeTimer = setInterval(() => { probeAll().catch(() => {}) }, probeIntervalMs)
+    probeTimer = setInterval(() => { probeAll().catch(() => {}) }, intervalMs)
     probeTimer.unref?.()
+  }
+  function startModelCatalogRefresh() {
+    clearInterval(modelCatalogTimer)
+    modelCatalogTimer = null
+    const minutes = Number(runtime.config.modelCatalogMinutes ?? 15)
+    if (!(minutes > 0)) return
+    modelCatalogTimer = setInterval(() => {
+      modelCatalog.refresh({ force: true, account: catalogAccount() }).catch(() => {})
+    }, Math.max(60000, minutes * 60000))
+    modelCatalogTimer.unref?.()
   }
   let panelHtml
   // Built Vue panel: index.html + app.js + app.css (no inline script, no eval).
@@ -298,6 +310,11 @@ export function createProxyServer(config, {
           streamHeartbeatMs: runtime.config.streamHeartbeatMs ?? 15000,
           logMaxEntries: runtime.config.logMaxEntries ?? 1000,
           grayModelIds: runtime.config.grayModels || [],
+          modelCatalogMinutes: runtime.config.modelCatalogMinutes ?? 15,
+          kimiCompatibility: runtime.config.kimiCompatibility !== false,
+          normalizeToolSchemas: runtime.config.normalizeToolSchemas !== false,
+          upstreamErrorFastFail: runtime.config.upstreamErrorFastFail !== false,
+          upstreamBodyLimitBytes: runtime.config.upstreamBodyLimitBytes ?? 4718592,
         },
       })
       return
@@ -441,11 +458,17 @@ export function createProxyServer(config, {
       for (const key of ['requestTimeoutMs', 'maxBodyBytes', 'allowPanelFromLan']) {
         if (input[key] !== undefined) candidate[key] = input[key]
       }
-      for (const key of ['accountProbeMinutes', 'streamHeartbeatMs', 'logMaxEntries']) {
+      for (const key of ['accountProbeMinutes', 'streamHeartbeatMs', 'logMaxEntries', 'modelCatalogMinutes', 'upstreamBodyLimitBytes']) {
         if (input[key] !== undefined) {
           const value = Number(input[key])
           if (!Number.isFinite(value) || value < 0) throw new HttpError(400, `${key} 必须是非负数字`, 'invalid_config_patch')
           candidate[key] = value
+        }
+      }
+      for (const key of ['kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail']) {
+        if (input[key] !== undefined) {
+          if (typeof input[key] !== 'boolean') throw new HttpError(400, `${key} 必须是布尔值`, 'invalid_config_patch')
+          candidate[key] = input[key]
         }
       }
       if (input.grayModels !== undefined) {
@@ -457,6 +480,9 @@ export function createProxyServer(config, {
       validateConfig(candidate)
       await persistRuntimeConfig(candidate)
       installRuntime(candidate)
+      requestLog.setMaxEntries(candidate.logMaxEntries ?? 1000)
+      startProbing()
+      startModelCatalogRefresh()
       sendJson(response, 200, {
         ok: true,
         requestTimeoutMs: candidate.requestTimeoutMs,
@@ -466,6 +492,11 @@ export function createProxyServer(config, {
         streamHeartbeatMs: candidate.streamHeartbeatMs ?? 15000,
         logMaxEntries: candidate.logMaxEntries ?? 1000,
         grayModels: candidate.grayModels || [],
+        modelCatalogMinutes: candidate.modelCatalogMinutes ?? 15,
+        kimiCompatibility: candidate.kimiCompatibility !== false,
+        normalizeToolSchemas: candidate.normalizeToolSchemas !== false,
+        upstreamErrorFastFail: candidate.upstreamErrorFastFail !== false,
+        upstreamBodyLimitBytes: candidate.upstreamBodyLimitBytes ?? 4718592,
         restartRequired: [],
       })
       return
@@ -596,7 +627,8 @@ export function createProxyServer(config, {
     }
   })
   startProbing()
-  server.on('close', () => { clearInterval(probeTimer); oauth.close?.() })
+  startModelCatalogRefresh()
+  server.on('close', () => { clearInterval(probeTimer); clearInterval(modelCatalogTimer); oauth.close?.() })
   server.requestTimeout = 0 // Streaming lifetime is controlled by the upstream AbortController.
   server.headersTimeout = 60000
   server.keepAliveTimeout = 5000

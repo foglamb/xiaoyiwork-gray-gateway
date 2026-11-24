@@ -43,7 +43,7 @@ export function patchChunk(value, modelHint) {
  * Preserve complete SSE blocks (including comments), remove its numeric id lines,
  * normalize OpenAI chunk fields, and terminate exactly once with data: [DONE].
  */
-export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken, onError } = {}) {
+export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken, onError, fastFail = true } = {}) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
@@ -94,7 +94,7 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
       }
     }
     if (parsed?.error) {
-      upstreamErrorSeen = true
+      if (fastFail) upstreamErrorSeen = true
       onError?.(parsed.error)
     }
     const text = parsed
@@ -127,22 +127,28 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
           // that stays silent for 10-30s does not look like a dead connection.
           // Keep a single in-flight read across heartbeat ticks: dropping it would
           // silently swallow the chunk that resolves later.
-          let readPromise = reader.read()
           let result
-          for (;;) {
-            let timer
-            const beat = new Promise((resolve) => {
-              timer = setTimeout(() => resolve('__beat__'), heartbeatMs)
-              timer.unref?.()
-            })
-            const raced = await Promise.race([readPromise.then((value) => ({ value })), beat])
-            clearTimeout(timer)
-            if (raced === '__beat__') {
-              if (Date.now() - lastWrite >= heartbeatMs) enqueue(controller, ': keepalive\n\n')
-              continue
+          if (!(heartbeatMs > 0)) {
+            // Zero disables heartbeat and, importantly, avoids a zero-delay
+            // timer loop while the upstream is thinking.
+            result = await reader.read()
+          } else {
+            let readPromise = reader.read()
+            for (;;) {
+              let timer
+              const beat = new Promise((resolve) => {
+                timer = setTimeout(() => resolve('__beat__'), heartbeatMs)
+                timer.unref?.()
+              })
+              const raced = await Promise.race([readPromise.then((value) => ({ value })), beat])
+              clearTimeout(timer)
+              if (raced === '__beat__') {
+                if (Date.now() - lastWrite >= heartbeatMs) enqueue(controller, ': keepalive\n\n')
+                continue
+              }
+              result = raced.value
+              break
             }
-            result = raced.value
-            break
           }
           const { value, done } = result
           if (done) break

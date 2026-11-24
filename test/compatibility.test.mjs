@@ -33,10 +33,11 @@ test('Kimi requests drop unsupported temperature and normalize named tool_choice
   assert.equal(untouched.temperature, 0.2)
 })
 
-function poolWith(fetchImpl) {
+function poolWith(fetchImpl, overrides = {}) {
   return new AccountPool({
     upstreamUrl: 'https://hag-drcn.op.dbankcloud.com/celia/v1/sse-api/chat/completions',
     accounts: { gray: [{ id: 'gray-test', uid: '123456', deviceId: 'device-test', credential: 'credential-test' }], stable: [] },
+    ...overrides,
   }, { fetchImpl })
 }
 
@@ -107,4 +108,29 @@ test('partial content is preserved when a later upstream error arrives', async (
   const result = await aggregateSse(upstream, 'Kimi_K3.1_Pro_VE')
   assert.equal(result.choices[0].message.content, 'partial')
   assert.equal(result.error.code, '11115')
+})
+
+test('compatibility switches preserve the original Kimi request when disabled', async () => {
+  let forwarded
+  const pool = poolWith(async (url, init) => {
+    forwarded = JSON.parse(init.body)
+    return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', { status: 200 })
+  }, { kimiCompatibility: false, normalizeToolSchemas: false })
+  await pool.chat({ model: 'Kimi_K3.1_Pro_VE', messages: [], stream: false, temperature: 0 }, { pool: 'gray', selected: true, reason: 'test', bucket: 0 })
+  assert.equal(forwarded.temperature, 0)
+})
+
+test('zero heartbeat disables keepalive without a zero-delay timer loop', async () => {
+  const upstream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"b"}}]}\n\n'))
+      controller.close()
+    },
+  })
+  const text = await new Response(transformSse(upstream, 'Kimi_K3.1_Pro_VE', { heartbeatMs: 0 })).text()
+  assert.doesNotMatch(text, /keepalive/)
+  assert.match(text, /"content":"a"/)
+  assert.match(text, /"content":"b"/)
 })

@@ -11,6 +11,8 @@ const keys = shallowRef({ apiKey: '', adminKey: '' })
 const tune = ref({
   requestTimeoutMs: 120000, maxBodyBytes: 10485760, accountProbeMinutes: 15,
   streamHeartbeatMs: 15000, logMaxEntries: 1000, allowPanelFromLan: false, grayModelIds: [],
+  modelCatalogMinutes: 15, kimiCompatibility: true, normalizeToolSchemas: true,
+  upstreamErrorFastFail: true, upstreamBodyLimitBytes: 4718592,
 })
 const savingTune = shallowRef(false)
 const allModels = computed(() => state.value?.models || [])
@@ -32,6 +34,11 @@ function syncTune() {
     logMaxEntries: s.logMaxEntries ?? 1000,
     allowPanelFromLan: Boolean(s.allowPanelFromLan),
     grayModelIds: [...(s.grayModelIds || [])],
+    modelCatalogMinutes: s.modelCatalogMinutes ?? 15,
+    kimiCompatibility: s.kimiCompatibility !== false,
+    normalizeToolSchemas: s.normalizeToolSchemas !== false,
+    upstreamErrorFastFail: s.upstreamErrorFastFail !== false,
+    upstreamBodyLimitBytes: s.upstreamBodyLimitBytes ?? 4718592,
   }
 }
 watch(() => state.value?.settings, syncTune, { immediate: true, deep: true })
@@ -171,7 +178,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         <div class="field">
           <label>请求体上限 maxBodyBytes</label>
           <input v-model.number="tune.maxBodyBytes" class="input" type="number" min="1024" step="1024" />
-          <span class="muted tiny">约 {{ (tune.maxBodyBytes / 1048576).toFixed(1) }} MB</span>
+          <span class="muted tiny">网关接收约 {{ (tune.maxBodyBytes / 1048576).toFixed(1) }} MB；上游仍受下方 4.5 MiB 限制</span>
         </div>
         <div class="field">
           <label>账号探活间隔 accountProbeMinutes</label>
@@ -184,9 +191,9 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           <span class="muted tiny">上游静默多久注入 keepalive，0 = 关闭</span>
         </div>
         <div class="field">
-          <label>日志保留条数 logMaxEntries</label>
+          <label>日志分页缓存 logMaxEntries</label>
           <input v-model.number="tune.logMaxEntries" class="input" type="number" min="50" max="5000" step="50" />
-          <span class="muted tiny">钳制在 50–5000</span>
+          <span class="muted tiny">仅内存与分页，不影响磁盘统计；50–5000</span>
         </div>
         <div class="field">
           <label>面板局域网访问</label>
@@ -202,6 +209,43 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
           {{ savingTune ? '保存中…' : '保存调优' }}
         </button>
         <span class="muted tiny">端口、监听地址与上游地址需改配置文件并重启</span>
+      </div>
+    </section>
+
+    <section class="card card-pad">
+      <span class="kicker">UPSTREAM MODELS</span>
+      <h3 class="mt">模型目录与请求兼容</h3>
+      <p class="muted tiny mb">这些开关只影响转发适配，不改变模型目录的真实来源。</p>
+      <div class="tune-grid">
+        <div class="field">
+          <label>目录自动刷新 modelCatalogMinutes</label>
+          <input v-model.number="tune.modelCatalogMinutes" class="input" type="number" min="0" step="1" />
+          <span class="muted tiny">从 HAG 获取真实模型；0 = 仅启动和手动刷新</span>
+        </div>
+        <div class="field">
+          <label>上游体积上限 upstreamBodyLimitBytes</label>
+          <input v-model.number="tune.upstreamBodyLimitBytes" class="input" type="number" min="65536" max="4718592" step="1024" />
+          <span class="muted tiny">{{ (tune.upstreamBodyLimitBytes / 1048576).toFixed(2) }} MiB；最高 4.5 MiB，超出返回 413</span>
+        </div>
+        <div class="field">
+          <label>Kimi 参数兼容</label>
+          <label class="inline-check"><input v-model="tune.kimiCompatibility" type="checkbox" /><span>修正 temperature 与具名 tool_choice</span></label>
+          <span class="muted tiny">避免 11115 / server inner</span>
+        </div>
+        <div class="field">
+          <label>工具 Schema 归一化</label>
+          <label class="inline-check"><input v-model="tune.normalizeToolSchemas" type="checkbox" /><span>内联 $ref 并补全 enum/const 类型</span></label>
+          <span class="muted tiny">关闭后原样转发工具 Schema</span>
+        </div>
+        <div class="field">
+          <label>SSE 错帧快速失败</label>
+          <label class="inline-check"><input v-model="tune.upstreamErrorFastFail" type="checkbox" /><span>收到错误帧立即中断上游读取</span></label>
+          <span class="muted tiny">仍向客户端发送标准错误和 [DONE]</span>
+        </div>
+      </div>
+      <div class="row save-row">
+        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">保存模型兼容设置</button>
+        <span class="muted tiny">保存后立即应用到新请求，无需重启</span>
       </div>
     </section>
 

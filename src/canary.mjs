@@ -154,6 +154,15 @@ export function validateConfig(input) {
   }
   if (!Number.isInteger(input.maxBodyBytes) || input.maxBodyBytes < 1024) throw new HttpError(400, 'maxBodyBytes 无效')
   if (!Number.isFinite(input.requestTimeoutMs) || input.requestTimeoutMs < 1000) throw new HttpError(400, 'requestTimeoutMs 无效')
+  for (const key of ['kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail']) {
+    if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new HttpError(400, `${key} 必须是布尔值`)
+  }
+  if (input.modelCatalogMinutes !== undefined && (!Number.isFinite(input.modelCatalogMinutes) || input.modelCatalogMinutes < 0)) {
+    throw new HttpError(400, 'modelCatalogMinutes 必须是非负数字')
+  }
+  if (input.upstreamBodyLimitBytes !== undefined && (!Number.isInteger(input.upstreamBodyLimitBytes) || input.upstreamBodyLimitBytes < 65536 || input.upstreamBodyLimitBytes > 4718592)) {
+    throw new HttpError(400, 'upstreamBodyLimitBytes 必须在 65536–4718592 之间')
+  }
   for (const pool of ['stable', 'gray']) {
     if (!Array.isArray(input.accounts?.[pool])) throw new HttpError(400, `accounts.${pool} 必须是数组`)
     for (const account of input.accounts[pool]) {

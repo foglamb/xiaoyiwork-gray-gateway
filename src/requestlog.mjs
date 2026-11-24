@@ -18,6 +18,12 @@ export class RequestLog {
     if (this.persist) this.#load()
   }
 
+  setMaxEntries(value) {
+    this.maxEntries = Math.max(50, Math.min(Number(value) || 1000, 5000))
+    if (this.entries.length > this.maxEntries) this.entries = this.entries.slice(-this.maxEntries)
+    return this.maxEntries
+  }
+
   #segmentPath(index) {
     return index === 0 ? this.path : `${this.path}.${index}`
   }

@@ -212,10 +212,14 @@ export class AccountPool {
    */
   async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken, onError } = {}) {
     this.configPath = configPath
-    const outgoing = normalizeRequestBody({ ...structuredClone(body), stream: true })
+    const outgoing = normalizeRequestBody({ ...structuredClone(body), stream: true }, {
+      kimi: this.config.kimiCompatibility !== false,
+      schemas: this.config.normalizeToolSchemas !== false,
+    })
     const outgoingText = JSON.stringify(outgoing)
-    if (Buffer.byteLength(outgoingText) > MAX_HAG_BODY_BYTES) {
-      throw new HttpError(413, `上游请求体超过 4.5 MiB 限制（${Buffer.byteLength(outgoingText)} B）`, 'upstream_body_too_large')
+    const upstreamBodyLimit = this.config.upstreamBodyLimitBytes ?? MAX_HAG_BODY_BYTES
+    if (Buffer.byteLength(outgoingText) > upstreamBodyLimit) {
+      throw new HttpError(413, `上游请求体超过 ${(upstreamBodyLimit / 1048576).toFixed(2)} MiB 限制（${Buffer.byteLength(outgoingText)} B）`, 'upstream_body_too_large')
     }
     const attempted = new Set()
     const failures = []
@@ -302,7 +306,7 @@ export class AccountPool {
       headers.set('content-type', 'text/event-stream; charset=utf-8')
       headers.set('x-accel-buffering', 'no')
       return new Response(transformSse(response.body, body.model, {
-        signal, onUsage, onFirstToken, onError, heartbeatMs: this.config.streamHeartbeatMs || 15000,
+        signal, onUsage, onFirstToken, onError, heartbeatMs: this.config.streamHeartbeatMs ?? 15000, fastFail: this.config.upstreamErrorFastFail !== false,
       }), { status: 200, headers })
     }
     return aggregateSse(response.body, body.model, { signal, onUsage, onFirstToken }).then((result) => {

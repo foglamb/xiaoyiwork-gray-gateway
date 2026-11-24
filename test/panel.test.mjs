@@ -186,3 +186,32 @@ test('chart hover uses a frozen snapshot and cannot index live data', async () =
   // Width is a computed ref now, so every use must read .value.
   assert.doesNotMatch(source, /\*\s*W\b(?!\.value)/)
 })
+
+test('runtime settings apply new model controls and resize the log page cache', async (t) => {
+  const { base, admin } = await launch(t)
+  const patch = {
+    requestTimeoutMs: 121000,
+    maxBodyBytes: 10 * 1024 * 1024,
+    accountProbeMinutes: 0,
+    streamHeartbeatMs: 0,
+    logMaxEntries: 50,
+    modelCatalogMinutes: 0,
+    upstreamBodyLimitBytes: 65536,
+    kimiCompatibility: false,
+    normalizeToolSchemas: false,
+    upstreamErrorFastFail: false,
+  }
+  const response = await fetch(`${base}/api/settings`, { method: 'POST', headers: admin, body: JSON.stringify(patch) })
+  assert.equal(response.status, 200)
+  const saved = await response.json()
+  assert.equal(saved.streamHeartbeatMs, 0)
+  assert.equal(saved.modelCatalogMinutes, 0)
+  assert.equal(saved.upstreamBodyLimitBytes, 65536)
+  assert.equal(saved.kimiCompatibility, false)
+  const state = await (await fetch(`${base}/api/state`, { headers: admin })).json()
+  assert.equal(state.requestTimeoutMs, 121000)
+  assert.equal(state.settings.normalizeToolSchemas, false)
+  assert.equal(state.settings.upstreamErrorFastFail, false)
+  const logs = await (await fetch(`${base}/api/logs?page=1&pageSize=20&hours=24`, { headers: admin })).json()
+  assert.equal(logs.maxEntries, 50, 'log cache size changes without restart')
+})

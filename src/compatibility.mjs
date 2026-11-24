@@ -350,11 +350,11 @@ export function normalizeToolSchemas(bodyObj) {
  *      若传对象（如 { type: 'function', function: { name: '...' } }）会触发 11115 / server inner，
  *      转为 'required' 以保留强制调用工具意图且避免网关报错。
  */
-export function normalizeRequestBody(bodyObj) {
+export function normalizeRequestBody(bodyObj, { kimi = true, schemas = true } = {}) {
   if (!bodyObj || typeof bodyObj !== 'object') return bodyObj
-  normalizeToolSchemas(bodyObj)
+  if (schemas) normalizeToolSchemas(bodyObj)
 
-  if (bodyObj.model && /kimi/i.test(bodyObj.model)) {
+  if (kimi && bodyObj.model && /kimi/i.test(bodyObj.model)) {
     if (bodyObj.temperature !== undefined && bodyObj.temperature !== 1) {
       delete bodyObj.temperature
     }
