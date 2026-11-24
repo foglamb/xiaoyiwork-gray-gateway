@@ -38,7 +38,7 @@ async function poll() {
     const result = await api(`/api/auth/oauth/status?state=${encodeURIComponent(session.value.state)}`)
     if (result.status === 'success') {
       stop()
-      notify(`账号 ${result.account?.id || ''} 已加入${poolLabel.value}`, 'ok')
+      notify(`账号 ${result.account?.id || ''} ${result.account?.replaced ? '已替换原凭据' : `已加入${poolLabel.value}`}`, 'ok')
       emit('done')
     } else if (result.status === 'failed') {
       stop()
@@ -56,7 +56,7 @@ async function submitCallback() {
   try {
     const result = await api('/api/auth/oauth/complete', { method: 'POST', body: JSON.stringify({ url: value }) })
     stop()
-    notify(`账号 ${result.account?.id || ''} 已加入${poolLabel.value}`, 'ok')
+    notify(`账号 ${result.account?.id || ''} ${result.account?.replaced ? '已替换原凭据' : `已加入${poolLabel.value}`}`, 'ok')
     emit('done')
   } catch (error) {
     status.value = 'waiting'
@@ -70,7 +70,7 @@ async function doImport() {
   message.value = ''
   try {
     const result = await api('/api/auth/import', { method: 'POST', body: JSON.stringify({ text: importText.value, pool: props.pool }) })
-    notify(`账号 ${result.account?.id || ''} 已导入${poolLabel.value}`, 'ok')
+    notify(`账号 ${result.account?.id || ''} ${result.account?.replaced ? '已替换原凭据' : `已导入${poolLabel.value}`}`, 'ok')
     emit('done')
   } catch (error) {
     message.value = error.message

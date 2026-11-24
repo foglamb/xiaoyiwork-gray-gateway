@@ -169,13 +169,47 @@ export function createProxyServer(config, {
     if (!['stable', 'gray'].includes(input.pool)) throw new HttpError(400, 'pool 必须为 stable 或 gray')
     const account = normalizeAccountInput(input)
     const candidate = structuredClone(runtime.config)
-    if (candidate.accounts[input.pool].some((item) => item.id === account.id)) throw new HttpError(409, `账号 ${account.id} 已存在`, 'account_exists')
-    const sameUid = [...candidate.accounts.stable, ...candidate.accounts.gray].find((item) => item.uid === account.uid)
-    if (sameUid && input.allowDuplicate !== true) throw new HttpError(409, `UID ${account.uid} 已配置为 ${sameUid.id}；同一 uid 续期会使旧凭据失效，如确认并存请设置 allowDuplicate`, 'duplicate_uid')
-    candidate.accounts[input.pool].push(account)
+    const accounts = candidate.accounts[input.pool]
+    const sameUidIndex = input.allowDuplicate === true ? -1 : accounts.findIndex((item) => item.uid === account.uid)
+    let replaced = false
+    let savedId = account.id
+
+    if (sameUidIndex >= 0) {
+      // Re-login/import for the same uid is a credential replacement, not a
+      // duplicate-account error. Keep the stable id so logs and quota caches
+      // remain associated with the same account.
+      const existing = accounts[sameUidIndex]
+      savedId = existing.id
+      accounts[sameUidIndex] = { ...existing, ...account, id: existing.id }
+      replaced = true
+    } else {
+      if (accounts.some((item) => item.id === account.id)) {
+        throw new HttpError(409, `账号 ID ${account.id} 已属于另一个 UID`, 'account_id_conflict')
+      }
+      const sameUidOtherPool = Object.entries(candidate.accounts)
+        .filter(([pool]) => pool !== input.pool)
+        .flatMap(([, list]) => list)
+        .find((item) => item.uid === account.uid)
+      if (sameUidOtherPool && input.allowDuplicate !== true) {
+        throw new HttpError(409, `UID ${account.uid} 已配置为 ${sameUidOtherPool.id}；如需跨池移动请先删除旧账号`, 'duplicate_uid')
+      }
+      accounts.push(account)
+    }
+
     validateConfig(candidate)
     await persistRuntimeConfig(candidate)
-    return { id: account.id, uid: account.uid, pool: input.pool, hasRefreshToken: Boolean(account.refreshToken), source: account.source || 'manual' }
+    if (replaced) {
+      quotaCache.delete(savedId)
+      quotaError.delete(savedId)
+    }
+    return {
+      id: savedId,
+      uid: account.uid,
+      pool: input.pool,
+      replaced,
+      hasRefreshToken: Boolean(account.refreshToken),
+      source: account.source || 'manual',
+    }
   }
 
   async function handle(request, response) {
@@ -330,7 +364,7 @@ export function createProxyServer(config, {
       const input = await readJsonBody(request, 256 * 1024)
       if (!['stable', 'gray'].includes(input.pool)) throw new HttpError(400, 'pool 必须为 stable 或 gray')
       const account = await addAccount(input)
-      sendJson(response, 201, { ok: true, id: account.id, pool: input.pool })
+      sendJson(response, 201, { ok: true, id: account.id, pool: input.pool, replaced: account.replaced })
       return
     }
     if (request.method === 'DELETE' && url.pathname.startsWith('/api/accounts/')) {

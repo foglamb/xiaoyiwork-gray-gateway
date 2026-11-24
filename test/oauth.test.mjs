@@ -104,6 +104,25 @@ test('oauth callback completes and the account is stored with its device binding
   assert.equal(reused.status, 404, 'session is single-use')
 })
 
+test('repeated OAuth login for the same uid replaces the saved credential', async (t) => {
+  const { base, admin } = await launch(t, { oauthManager: managerWith(fakeOauthFetch().fetchImpl) })
+  async function login() {
+    const started = await (await fetch(`${base}/api/auth/oauth/start`, { method: 'POST', headers: admin, body: '{"pool":"stable"}' })).json()
+    const callback = `http://127.0.0.1:17355/auth/callback?code=auth-code-1&state=${started.state}`
+    await fetch(`${base}/api/auth/oauth/complete`, { method: 'POST', headers: admin, body: JSON.stringify({ state: started.state, callbackUrl: callback }) })
+    const response = await fetch(`${base}/api/auth/oauth/status?state=${started.state}`, { headers: admin })
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  const first = await login()
+  const second = await login()
+  assert.equal(first.account.replaced, false)
+  assert.equal(second.account.replaced, true)
+  assert.equal(second.account.id, first.account.id)
+  const state = await (await fetch(`${base}/api/state`, { headers: admin })).json()
+  assert.equal(state.accounts.filter((item) => item.pool === 'stable').length, 1)
+})
+
 test('manual interface credentials are rejected; only login state import is allowed', async (t) => {
   const { base, admin } = await launch(t, { oauthManager: managerWith(fakeOauthFetch().fetchImpl) })
   const manual = await fetch(`${base}/api/accounts`, { method: 'POST', headers: admin, body: JSON.stringify({ pool: 'stable', credential: 'x', uid: '123456', deviceId: 'device-1' }) })
