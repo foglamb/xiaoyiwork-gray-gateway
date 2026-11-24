@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { HttpError } from './canary.mjs'
 
 export const DEFAULT_HEADERS = {
   'content-type': 'application/json',
@@ -42,7 +43,7 @@ export function patchChunk(value, modelHint) {
  * Preserve complete SSE blocks (including comments), remove its numeric id lines,
  * normalize OpenAI chunk fields, and terminate exactly once with data: [DONE].
  */
-export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken } = {}) {
+export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken, onError } = {}) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
@@ -51,6 +52,7 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
   let reader
   let lastWrite = 0
   let firstTokenSeen = false
+  let upstreamErrorSeen = false
 
   const enqueue = (controller, text) => {
     if (!outputClosed && text) {
@@ -80,7 +82,21 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
       terminated = true
       return 'data: [DONE]\n\n'
     }
-    const parsed = parseJson(data)
+    let parsed = parseJson(data)
+    if (parsed && !parsed.choices && (parsed.code || parsed.message) && !parsed.error) {
+      parsed = {
+        ...parsed,
+        error: {
+          message: String(parsed.message || '小艺Work 上游错误'),
+          type: 'upstream_error',
+          ...(parsed.code !== undefined ? { code: String(parsed.code) } : {}),
+        },
+      }
+    }
+    if (parsed?.error) {
+      upstreamErrorSeen = true
+      onError?.(parsed.error)
+    }
     const text = parsed
       ? `data: ${JSON.stringify(patchChunk(parsed, modelHint))}\n\n`
       : `${lines.join('\n')}\n\n`
@@ -132,19 +148,19 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
           if (done) break
           buffer += decoder.decode(value, { stream: true })
           let end
-          while (!terminated && (end = findEventBoundary(buffer)) !== null) {
+          while (!terminated && !upstreamErrorSeen && (end = findEventBoundary(buffer)) !== null) {
             const block = buffer.slice(0, end.index)
             buffer = buffer.slice(end.index + end.length)
             enqueue(controller, normalizeBlock(block))
           }
-          if (terminated) {
+          if (terminated || upstreamErrorSeen) {
             await reader.cancel().catch(() => {})
             break
           }
         }
         if (outputClosed) return
         buffer += decoder.decode()
-        if (!terminated && buffer.trim()) enqueue(controller, normalizeBlock(buffer))
+        if (!terminated && !upstreamErrorSeen && buffer.trim()) enqueue(controller, normalizeBlock(buffer))
         emitDone(controller)
         close(controller)
       } catch (error) {
@@ -181,6 +197,7 @@ export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFir
   let model = modelHint
   let finishReason = null
   let usage
+  let upstreamError = null
 
   for (const block of text.split(/\r?\n\r?\n/)) {
     const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:'))
@@ -188,6 +205,7 @@ export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFir
     if (!data || data === '[DONE]') continue
     const chunk = parseJson(data)
     if (!chunk) continue
+    if (chunk.error) upstreamError = chunk.error
     id = chunk.id || id
     created = chunk.created || created
     model = chunk.model || model
@@ -212,9 +230,14 @@ export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFir
   }
   if (reasoning) message.reasoning_content = reasoning
   if (toolCalls.size) message.tool_calls = [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call)
+  if (upstreamError && !message.content && !reasoning && !toolCalls.size) {
+    const code = upstreamError.code ? `（${upstreamError.code}）` : ''
+    throw new HttpError(502, `小艺Work 上游错误${code}：${upstreamError.message || '未知错误'}`, 'upstream_error')
+  }
   return {
     id, object: 'chat.completion', created, model,
     choices: [{ index: 0, message, finish_reason: finishReason || (toolCalls.size ? 'tool_calls' : 'stop') }],
     ...(usage ? { usage } : {}),
+    ...(upstreamError ? { error: upstreamError } : {}),
   }
 }

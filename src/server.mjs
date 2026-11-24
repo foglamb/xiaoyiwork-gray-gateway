@@ -546,6 +546,7 @@ export function createProxyServer(config, {
       })
       let usage
       let accountId = ''
+      let upstreamError = null
       try {
         let firstTokenAt = 0
         const upstreamResponse = await runtime.pool.chat(body, route, {
@@ -553,6 +554,7 @@ export function createProxyServer(config, {
           configPath,
           onUsage: (value) => { usage = value },
           onFirstToken: () => { if (!firstTokenAt) firstTokenAt = Date.now() },
+          onError: (error) => { upstreamError = error },
         })
         accountId = upstreamResponse.headers.get('x-xiaoyi-account') || ''
         response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers))
@@ -564,7 +566,9 @@ export function createProxyServer(config, {
         response.end()
         recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
         requestLog.finish(requestId, {
-          status: upstreamResponse.status, accountId, usage, rate: 0,
+          status: upstreamError ? 502 : upstreamResponse.status,
+          accountId, usage, rate: 0,
+          error: upstreamError?.message || undefined,
           marks: { firstByteAt: runtime.pool.lastFirstByteAt || null, firstTokenAt: firstTokenAt || null },
         })
       } catch (error) {

@@ -2,8 +2,10 @@ import { rename, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { authHeaders, aggregateSse, transformSse } from './upstream.mjs'
 import { HttpError } from './canary.mjs'
+import { normalizeRequestBody } from './compatibility.mjs'
 
 const HAG = 'https://hag-drcn.op.dbankcloud.com'
+export const MAX_HAG_BODY_BYTES = 4_718_592 // 4.5 MiB; larger requests hang then 408 upstream
 const CLIENT_ID = '6917612679526496902'
 
 export class AccountPool {
@@ -208,9 +210,13 @@ export class AccountPool {
    * - 5xx / network: cool briefly, try the next one.
    * The client sees one request; it never learns an account was swapped.
    */
-  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken } = {}) {
+  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken, onError } = {}) {
     this.configPath = configPath
-    const outgoing = { ...body, stream: true }
+    const outgoing = normalizeRequestBody({ ...structuredClone(body), stream: true })
+    const outgoingText = JSON.stringify(outgoing)
+    if (Buffer.byteLength(outgoingText) > MAX_HAG_BODY_BYTES) {
+      throw new HttpError(413, `上游请求体超过 4.5 MiB 限制（${Buffer.byteLength(outgoingText)} B）`, 'upstream_body_too_large')
+    }
     const attempted = new Set()
     const failures = []
     let lastError = null
@@ -224,7 +230,7 @@ export class AccountPool {
       const execute = () => this.fetch(this.config.upstreamUrl, {
         method: 'POST',
         headers: authHeaders(account),
-        body: JSON.stringify(outgoing),
+        body: outgoingText,
         signal,
       })
       let response
@@ -252,7 +258,7 @@ export class AccountPool {
         this.clearCool(account)
         this.lastFirstByteAt = Date.now()
         this.stats.failovers = (this.stats.failovers || 0) + (attempt > 0 ? 1 : 0)
-        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage, onFirstToken })
+        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage, onFirstToken, onError })
       }
 
       this.stats.upstreamErrors++
@@ -282,7 +288,7 @@ export class AccountPool {
       : new HttpError(503, `${route.pool} 池没有可用账号，请检查凭据或在面板重新登录${detail}`, 'account_pool_empty')
   }
 
-  #respond({ response, account, route, pool, body, signal, onUsage, onFirstToken }) {
+  #respond({ response, account, route, pool, body, signal, onUsage, onFirstToken, onError }) {
     const headers = new Headers({
       'x-xiaoyi-route': route.selected ? 'gray' : 'stable',
       'x-xiaoyi-pool': pool,
@@ -296,7 +302,7 @@ export class AccountPool {
       headers.set('content-type', 'text/event-stream; charset=utf-8')
       headers.set('x-accel-buffering', 'no')
       return new Response(transformSse(response.body, body.model, {
-        signal, onUsage, onFirstToken, heartbeatMs: this.config.streamHeartbeatMs || 15000,
+        signal, onUsage, onFirstToken, onError, heartbeatMs: this.config.streamHeartbeatMs || 15000,
       }), { status: 200, headers })
     }
     return aggregateSse(response.body, body.model, { signal, onUsage, onFirstToken }).then((result) => {
