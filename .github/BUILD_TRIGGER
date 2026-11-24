@@ -1,0 +1,4 @@
+GitHub Actions GHCR build trigger
+Triggered at: 2026-11-24T17:58:00+08:00
+Source revision: 439db3e266946d497cc2da4034f37ccf16169682
+Purpose: build and publish linux/amd64 and linux/arm64 images to GHCR.
