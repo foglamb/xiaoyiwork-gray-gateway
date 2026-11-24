@@ -100,3 +100,27 @@ test('disabled Work web agent reports the real feature gate instead of cookie ex
   assert.doesNotMatch(catalog.publicStatus().message, /过期/)
   assert.equal(calls.some((url) => url.includes('getWorkModelList')), false)
 })
+
+test('HAG catalogue uses businessCredential and real upstream model metadata', async () => {
+  const calls = []
+  const catalog = new ModelCatalog({ fetchImpl: async (url, init = {}) => {
+    calls.push({ url, init })
+    return Response.json({ contents: [{ modelList: [
+      { modelValue: 'Kimi_Real', modelName: 'Kimi Real', modelDescription: '复杂任务', gray: true, aiPointConsumptionRatio: '消耗13x' },
+      { modelValue: 'Auto-Model', modelName: 'Auto-Model', gray: false },
+    ] }] })
+  } })
+  const status = await catalog.refresh({ force: true, account: { credential: 'business-secret', uid: '123456', deviceId: 'device-123456' } })
+  assert.equal(status.ok, true)
+  assert.equal(calls.length, 1, 'HAG succeeds without the web cookie fallback')
+  assert.match(calls[0].url, /user-ability-gallery\/v1\/agent\/user\/query/)
+  assert.equal(calls[0].init.headers.businessCredential, 'business-secret')
+  assert.equal(calls[0].init.headers['x-prd-pkg-name'], 'com.huawei.hmos.vassistant')
+  assert.equal(JSON.parse(calls[0].init.body).type, 'CELIA_CLAW_USER_MODEL_QUERY')
+  const models = catalog.list(config)
+  assert.equal(models.find((m) => m.id === 'Kimi_Real').name, 'Kimi Real')
+  assert.equal(models.find((m) => m.id === 'Kimi_Real').gray, true)
+  assert.equal(models.find((m) => m.id === 'Kimi_Real').upstreamRate, '消耗13x')
+  assert.equal(models.find((m) => m.id === 'Kimi_Real').rate, 0)
+  assert.equal(models.find((m) => m.id === 'Kimi_Real').description, '复杂任务')
+})

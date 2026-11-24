@@ -85,6 +85,7 @@ async function copy(id) {
           <span v-if="model.gray" class="badge warn">灰度</span>
         </div>
         <code class="model-id truncate">{{ model.id }}</code>
+        <p v-if="model.description" class="model-desc">{{ model.description }}</p>
         <div class="model-meta">
           <span v-if="model.vision" class="badge info">视觉</span>
           <span class="badge">{{ sourceLabel[model.source] || model.source || '记录' }}</span>
@@ -132,7 +133,8 @@ async function copy(id) {
 .model-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .model-head strong { font-size: 12.5px; font-weight: 620; }
 .model-id { font-size: 10.5px; color: var(--dim); }
-.model-meta { display: flex; align-items: center; gap: 5px; }
+.model-desc { min-height: 16px; font-size: 10.5px; line-height: 1.5; color: var(--dim); }
+.model-meta { display: flex; align-items: center; gap: 5px; margin-top: auto; }
 .catalog-note { padding: 0 2px; font-size: 11px; color: var(--dim); line-height: 1.55; }
 .catalog-note.warn { color: var(--amber); }
 .copy-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim-2); opacity: 0; transition: opacity var(--dur-1) var(--ease); }

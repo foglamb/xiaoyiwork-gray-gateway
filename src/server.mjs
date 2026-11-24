@@ -76,7 +76,8 @@ export function createProxyServer(config, {
   const modelCatalog = new ModelCatalog({ fetchImpl, logger, configPath })
   const observedModels = new Set(requestLog.modelIds())
   const modelList = () => modelCatalog.list(runtime.config, [...observedModels])
-  modelCatalog.refresh().catch(() => {})
+  const catalogAccount = () => runtime.config.accounts.gray[0] || runtime.config.accounts.stable[0] || null
+  modelCatalog.refresh({ account: catalogAccount() }).catch(() => {})
   const quotaCache = new Map()
   const quotaInflight = new Map()
   const quotaError = new Map()
@@ -500,7 +501,8 @@ export function createProxyServer(config, {
     }
     if (request.method === 'POST' && url.pathname === '/api/models/session') {
       const input = await readJsonBody(request, 65536)
-      const status = await modelCatalog.importSession(input)
+      await modelCatalog.importSession(input)
+      const status = await modelCatalog.refresh({ force: true, account: catalogAccount() })
       sendJson(response, 200, { ok: status.ok, status, models: modelList() })
       return
     }
@@ -510,7 +512,7 @@ export function createProxyServer(config, {
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/models/refresh') {
-      const status = await modelCatalog.refresh({ force: true })
+      const status = await modelCatalog.refresh({ force: true, account: catalogAccount() })
       sendJson(response, 200, { ok: status.ok, status, models: modelList() })
       return
     }

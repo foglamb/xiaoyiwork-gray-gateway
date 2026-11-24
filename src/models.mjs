@@ -1,8 +1,11 @@
 import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { authHeaders } from './upstream.mjs'
 
 const WORK_MODELS_URL = 'https://xiaoyi.huawei.com/celia/service/work/getWorkModelList'
 const CHAT_URL = 'https://xiaoyi.huawei.com/chat/'
+const HAG_MODELS_URL = 'https://hag-drcn.op.dbankcloud.com/user-ability-gallery/v1/agent/user/query'
+const PLATFORM_AGENT_ID = 'agent208b6760552b4fa0b395e5165d0d771e'
 const COOKIE_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
 function cookiePairs(input) {
@@ -127,23 +130,30 @@ export class ModelCatalog {
     for (const id of [...(config.grayModels || []), ...(config.gray?.models || [])]) add(id, id, 'config')
     return [...rows.values()].map((model) => ({
       ...model,
-      gray: (config.grayModels || []).includes(model.id) || (config.gray?.models || []).includes(model.id),
+      gray: model.gray === true || (config.grayModels || []).includes(model.id) || (config.gray?.models || []).includes(model.id),
       rate: 0,
     })).sort((a, b) => a.id.localeCompare(b.id))
   }
 
-  async refresh({ force = false } = {}) {
+  async refresh({ force = false, account = null } = {}) {
     if (this.inflight) return this.inflight
     if (!force && this.status.ok && this.status.refreshedAt && Date.now() - Date.parse(this.status.refreshedAt) < 900000) {
       return this.publicStatus()
     }
-    this.inflight = this.#discover().finally(() => { this.inflight = null })
+    this.inflight = this.#discover(account).finally(() => { this.inflight = null })
     return this.inflight
   }
 
-  async #discover() {
+  async #discover(account) {
     try {
-      const models = await this.#workModels()
+      let models
+      try {
+        if (!account) throw new Error('没有可用于 HAG 目录的账号')
+        models = await this.#hagModels(account)
+      } catch (hagError) {
+        try { models = await this.#workModels() }
+        catch (webError) { throw new Error(`${hagError.message}；网页备用目录：${webError.message}`) }
+      }
       if (!models.length) throw new Error('上游返回了空模型目录')
       this.upstream = models
       this.status = { ok: true, source: 'upstream', message: `已从上游获取 ${models.length} 个模型`, refreshedAt: new Date().toISOString() }
@@ -159,6 +169,39 @@ export class ModelCatalog {
       }
     }
     return this.publicStatus()
+  }
+
+  async #hagModels(account) {
+    const response = await this.fetch(HAG_MODELS_URL, {
+      method: 'POST',
+      headers: {
+        ...authHeaders(account, { sse: false }),
+        'x-prd-pkg-name': 'com.huawei.hmos.vassistant',
+      },
+      body: JSON.stringify({
+        type: 'CELIA_CLAW_USER_MODEL_QUERY',
+        terminalInfo: {
+          agentId: PLATFORM_AGENT_ID,
+          brand: 'HUAWEI', countryCode: 'CN', deviceType: 'PC',
+          language: 'zh_CN', locale: 'zh-CN', manufacturer: 'HUAWEI',
+          osType: 'Hap', phoneType: 'ALN-AL80', prdVer: '11.6.5.414',
+          privacyOption: {}, sysVer: 'OpenHarmony-6.1.1.35(Beta1)', ohosApiVersion: 24,
+        },
+        pagination: { limit: 500, start: '0' },
+      }),
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!response.ok) throw new Error(`HAG 模型目录 HTTP ${response.status}`)
+    const payload = await response.json()
+    const list = (payload.contents || []).flatMap((content) => content.modelList || [])
+    return list.map((row) => ({
+      id: String(row.modelValue || '').trim(),
+      name: String(row.modelName || row.modelValue || '').trim(),
+      description: String(row.modelDescription || '').trim(),
+      gray: row.gray === true,
+      upstreamRate: row.aiPointConsumptionRatio || '',
+      vision: row.vision ?? row.supportVision ?? null,
+    })).filter((row) => row.id)
   }
 
   async #workModels() {

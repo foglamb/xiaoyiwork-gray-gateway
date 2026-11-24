@@ -171,22 +171,30 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 
 ### 模型目录来源
 
-不再在服务端写死模型 ID 清单。`ModelCatalog` 优先请求小艺 Work 的
-`getWorkModelList` 上游目录，使用响应里的 `modelName` / `modelValue`。
-若上游目录不可用，面板会**明确显示错误**，并退化为两类真实来源：
+模型目录优先调用小艺 Work 的真实 HAG 接口（与 OpenCode 插件一致）：
+
+```text
+POST https://hag-drcn.op.dbankcloud.com/user-ability-gallery/v1/agent/user/query
+type = CELIA_CLAW_USER_MODEL_QUERY
+```
+
+该接口直接复用当前账号的 `businessCredential + uid + deviceId`，并携带
+`x-prd-pkg-name: com.huawei.hmos.vassistant`；不需要网页 Cookie。
+模型 ID、名称、描述、上游灰度标志和原始倍率文本均来自响应，不写死清单。
+网关自己的 `rate` 仍为 0，不根据上游倍率文本估算扣费。
+
+若 HAG 目录不可用，才尝试网页版 `getWorkModelList` 备用会话，最后回退到：
 
 - `observed`：保留日志中实际出现过的模型 ID；
 - `config`：灰度配置里显式登记的模型 ID。
 
-不会把回退数据伪装成上游目录。`POST /api/models/refresh` 可手动重新发现；
-所有模型的计费倍率均报告为 0，不估算费用。
+不会把回退数据伪装成上游目录。`POST /api/models/refresh` 可手动重新发现。
 
 网页目录会话与聊天凭据分离。模型页可导入 `xiaoyi.huawei.com` 的 Cookie，
 服务端保存到配置目录的 `model-catalog-session.json`，写入后强制执行 `0600`。
 Cookie 不进入日志、状态接口或 Git 仓库；清除会话不会删除已验证的上游缓存。
-会话过期只影响目录刷新，不影响聊天、灰度或余额接口。
-若上游 `common` 配置中的小艺Work代理为 `enableAgent=false`，面板会直接报告
-“当前网页配置未开放小艺Work Web”，不会再把功能关闭误报为 Cookie 过期。
+若上游网页配置为 `enableAgent=false`，面板会直接报告功能未开放，而不是误报
+Cookie 过期。任何目录故障都不影响聊天、灰度或余额接口。
 
 ### 灰度控制台
 
