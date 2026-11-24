@@ -46,3 +46,44 @@ test('model discovery failure is explicit and keeps observed/config models', asy
   assert.deepEqual(models.map((m) => m.id).sort(), ['Configured_Model', 'Gray_Only', 'Real_Request_Model'].sort())
   assert.equal(models.find((m) => m.id === 'Real_Request_Model').source, 'observed')
 })
+
+test('web model session persists privately, restores cache and redacts cookie', async () => {
+  const { mkdtemp, readFile, stat } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-model-session-'))
+  const configPath = join(dir, 'config.json')
+  const calls = []
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url, init })
+    if (String(url).endsWith('/chat/')) return new Response('<html></html>', { status: 200 })
+    return Response.json({ operationResult: JSON.stringify({ contents: [{ modelList: [{ modelName: 'Real Kimi', modelValue: 'Real_Kimi' }] }] }) })
+  }
+  const catalog = new ModelCatalog({ configPath, fetchImpl })
+  const status = await catalog.importSession({ cookies: [
+    { name: 'xy_csrf_token', value: 'private-csrf' },
+    { name: 'web_login', value: 'private-web-cookie' },
+  ] })
+  assert.equal(status.ok, true)
+  assert.equal(status.sessionConfigured, true)
+  assert.equal(JSON.stringify(status).includes('private-web-cookie'), false)
+  assert.equal(catalog.list(config).find((model) => model.id === 'Real_Kimi').source, 'upstream')
+  const savedPath = join(dir, 'model-catalog-session.json')
+  assert.equal((await stat(savedPath)).mode & 0o777, 0o600)
+  const saved = await readFile(savedPath, 'utf8')
+  assert.match(saved, /private-web-cookie/)
+  assert.match(saved, /Real_Kimi/)
+  const modelCall = calls.find((call) => String(call.url).includes('getWorkModelList'))
+  assert.match(modelCall.init.headers.cookie, /web_login=private-web-cookie/)
+  assert.equal(modelCall.init.headers['x-csrf-token'], 'private-csrf')
+
+  const restored = new ModelCatalog({ configPath, fetchImpl })
+  assert.equal(restored.publicStatus().source, 'upstream-cache')
+  assert.equal(restored.list(config).find((model) => model.id === 'Real_Kimi').name, 'Real Kimi')
+  restored.clearSession()
+  assert.equal(restored.publicStatus().sessionConfigured, false)
+  assert.equal(restored.publicStatus().source, 'upstream-cache')
+  assert.doesNotMatch(restored.publicStatus().message, /过期/)
+  assert.equal((await readFile(savedPath, 'utf8')).includes('private-web-cookie'), false)
+  assert.equal(restored.list(config).some((model) => model.id === 'Real_Kimi'), true)
+})

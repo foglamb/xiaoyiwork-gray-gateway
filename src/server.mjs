@@ -73,7 +73,7 @@ export function createProxyServer(config, {
 } = {}) {
   let runtime = runtimeFrom(config, configPath, fetchImpl, persistConfig)
   const requestLog = new RequestLog({ configPath, persist: Boolean(configPath), maxEntries: config.logMaxEntries || 1000 })
-  const modelCatalog = new ModelCatalog({ fetchImpl, logger })
+  const modelCatalog = new ModelCatalog({ fetchImpl, logger, configPath })
   const observedModels = new Set(requestLog.modelIds())
   const modelList = () => modelCatalog.list(runtime.config, [...observedModels])
   modelCatalog.refresh().catch(() => {})
@@ -254,7 +254,7 @@ export function createProxyServer(config, {
           accounts: quotaCache.size,
           totalAccounts: runtime.config.accounts.stable.length + runtime.config.accounts.gray.length,
         },
-        models: modelList(), modelCatalog: modelCatalog.status,
+        models: modelList(), modelCatalog: modelCatalog.publicStatus(),
         requestTimeoutMs: runtime.config.requestTimeoutMs,
         settings: {
           maxBodyBytes: runtime.config.maxBodyBytes,
@@ -462,6 +462,17 @@ export function createProxyServer(config, {
       installRuntime(candidate)
       logger.log(`[canary] enabled=${candidate.gray.enabled} percentage=${candidate.gray.percentage} pool=${candidate.gray.pool}`)
       sendJson(response, 200, publicConfig(runtime.config, runtime.pool.stats))
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/models/session') {
+      const input = await readJsonBody(request, 65536)
+      const status = await modelCatalog.importSession(input)
+      sendJson(response, 200, { ok: status.ok, status, models: modelList() })
+      return
+    }
+    if (request.method === 'DELETE' && url.pathname === '/api/models/session') {
+      const status = modelCatalog.clearSession()
+      sendJson(response, 200, { ok: true, status, models: modelList() })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/models/refresh') {

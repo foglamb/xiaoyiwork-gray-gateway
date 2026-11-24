@@ -179,6 +179,11 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 不会把回退数据伪装成上游目录。`POST /api/models/refresh` 可手动重新发现；
 所有模型的计费倍率均报告为 0，不估算费用。
 
+网页目录会话与聊天凭据分离。模型页可导入 `xiaoyi.huawei.com` 的 Cookie，
+服务端保存到配置目录的 `model-catalog-session.json`，写入后强制执行 `0600`。
+Cookie 不进入日志、状态接口或 Git 仓库；清除会话不会删除已验证的上游缓存。
+会话过期只影响目录刷新，不影响聊天、灰度或余额接口。
+
 ### 灰度控制台
 
 界面对应 `POST /_admin/gray`（热更新，无需重启），可调：
@@ -335,6 +340,8 @@ print(answer.choices[0].message.content)
 | POST | `/_admin/gray` | Admin key | 灰度热更新（比例/名单/覆盖/影子） |
 | POST | `/api/settings` | 本机 + Admin key | 热更新超时、体积上限、探活、心跳、日志上限、灰度模型 |
 | POST | `/api/models/refresh` | 本机 + Admin key | 重新获取上游模型目录，失败保留真实回退来源 |
+| POST | `/api/models/session` | 本机 + Admin key | 导入网页目录 Cookie 并立即验证，响应不含 Cookie |
+| DELETE | `/api/models/session` | 本机 + Admin key | 清除网页目录 Cookie，保留真实上游缓存 |
 | GET | `/api/logs` | 本机 + Admin key | 分页请求日志 + 统计 + 图表聚合 |
 | POST | `/api/logs/clear` | 本机 + Admin key | 清空请求记录 |
 | POST | `/api/auth/oauth/start` | 本机 + Admin key | 发起华为账号 OAuth 登录 |

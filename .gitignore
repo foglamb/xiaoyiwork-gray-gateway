@@ -2,6 +2,7 @@ node_modules/
 config/config.json
 config/*.tmp
 config/requests.jsonl
+config/model-catalog-session.json
 *.log
 *.tgz
 .env
