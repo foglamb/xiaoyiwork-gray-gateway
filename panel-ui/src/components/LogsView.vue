@@ -4,7 +4,7 @@ import { logs, logStats, refreshAll, loadLogs } from '../composables/useDashboar
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 import AppIcon from './AppIcon.vue'
-import { num, ms, clock, pct, compact } from '../composables/useFormat.js'
+import { num, ms, clock, pct, compact, exact, ago } from '../composables/useFormat.js'
 
 const props = defineProps({ polling: { type: Boolean, default: true } })
 const emit = defineEmits(['update:polling'])
@@ -70,7 +70,9 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
       <div class="mini card"><span>请求</span><b>{{ num(logStats.last24h || 0) }}</b></div>
       <div class="mini card"><span>失败</span><b :class="{ bad: (logStats.failed24h || 0) > 0 }">{{ num(logStats.failed24h || 0) }}</b></div>
       <div class="mini card"><span>缓存命中率</span><b class="good">{{ pct(logStats.cacheHitRate) }}</b></div>
-      <div class="mini card"><span>总 Token</span><b>{{ compact(logStats.tokens24h || 0) }}</b></div>
+      <div class="mini card" :title="`输入 ${exact(logStats.promptTokens24h)} + 输出 ${exact(logStats.completionTokens24h)}`">
+        <span>总 Token</span><b>{{ compact(logStats.tokens24h || 0) }}</b>
+      </div>
       <div class="mini card"><span>平均耗时</span><b>{{ ms(logStats.averageMs) }}</b></div>
     </div>
 

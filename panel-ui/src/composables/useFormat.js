@@ -6,13 +6,21 @@ export function num(value) {
   return n.toLocaleString('en-US')
 }
 
-export function compact(value) {
+export function compact(value, digits = 2) {
   const n = Number(value) || 0
-  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(1)}B`
-  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(1)}M`
-  if (Math.abs(n) >= 1e4) return `${(n / 1e3).toFixed(0)}k`
+  // Two decimals keep small addends visible next to a large total: with one
+  // decimal, 403,512 output tokens round away and the sum looks wrong.
+  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(digits)}B`
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(digits)}M`
+  if (Math.abs(n) >= 1e4) return `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}k`
   if (Math.abs(n) >= 1e3) return `${(n / 1e3).toFixed(1)}k`
   return String(Math.round(n))
+}
+
+/** Exact integer with thousands separators, for places where sums must add up. */
+export function exact(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : '—'
 }
 
 export function pct(value, digits = 1) {

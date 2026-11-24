@@ -8,6 +8,8 @@ defineProps({
   tone: { type: String, default: '' },
   icon: { type: String, default: '' },
 })
+// Root element inherits fallthrough attrs (title, aria-*), so an exact value
+// can be exposed on hover without adding another prop.
 </script>
 
 <template>

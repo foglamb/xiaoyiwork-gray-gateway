@@ -103,3 +103,35 @@ test('reaching maxEntries rotates segments instead of rewriting the active file'
   assert.equal(log.entries.length <= 50, true)
   assert.equal(log.page({ page: 1, pageSize: 50 }).total <= 50, true)
 })
+
+test('24h totals cover records evicted from the in-memory ring', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-log-totals-'))
+  const configPath = join(dir, 'config.json')
+  await writeFile(configPath, '{}\n')
+
+  // 30 records on disk, ring capped at 10: totals must still count all 30.
+  const logPath = join(dir, 'requests.jsonl')
+  const now = Date.now()
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    id: `r${i}`, at: now - i * 1000, model: 'm', status: 200, ms: 10,
+    promptTokens: 100, completionTokens: 10, totalTokens: 110, cachedTokens: 50, reasoningTokens: 0,
+  }))
+  await writeFile(logPath, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  const log = new RequestLog({ configPath, maxEntries: 50 })
+  assert.equal(log.entries.length, 30, 'loads all records under the cap')
+
+  // Simulate the ring shrinking while the file keeps every record.
+  log.entries = log.entries.slice(0, 10)
+  const stats = log.stats()
+  assert.equal(stats.last24h, 30, '24h count must not shrink with the ring')
+  assert.equal(stats.tokens24h, 30 * 110, '24h tokens must cover every recorded request')
+
+  // The chart series must agree with the KPI totals exactly.
+  const byHour = log.breakdown(24).byHour
+  const charted = byHour.reduce((acc, b) => acc + b.total, 0)
+  assert.equal(charted, stats.tokens24h, 'chart aggregate equals KPI total')
+})

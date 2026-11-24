@@ -162,9 +162,40 @@ export class RequestLog {
     try { writeFileSync(this.path, '', { mode: 0o600 }) } catch { /* ignore */ }
   }
 
+  /**
+   * Totals must cover every record on disk, not just the in-memory ring.
+   * The ring only exists for paging, so using it here made the 24h totals
+   * shrink as new requests pushed old entries out.
+   */
+  #allEntries() {
+    if (!this.persist) return this.entries
+    const cutoff = Date.now() - 86400000
+    const seen = new Set()
+    const out = []
+    const collect = (list) => {
+      for (const entry of list) {
+        if (!entry || entry.flushed || entry.id && seen.has(entry.id)) continue
+        if (entry.id) seen.add(entry.id)
+        out.push(entry)
+      }
+    }
+    // Current segment first, then older segments while they stay in the window.
+    collect(this.entries)
+    for (let index = this.segment; index >= 0 && index >= this.segment - 2; index--) {
+      let text = ''
+      try { text = readFileSync(this.#segmentPath(index), 'utf8') } catch { continue }
+      const list = text.split('\n').filter(Boolean)
+        .map((line) => { try { return JSON.parse(line) } catch { return null } })
+        .filter((entry) => entry && !entry.flushed && entry.at >= cutoff)
+      collect(list)
+    }
+    return out
+  }
+
   stats() {
     const cutoff = Date.now() - 86400000
-    const day = this.entries.filter((entry) => entry.at >= cutoff)
+    const source = this.#allEntries()
+    const day = source.filter((entry) => entry.at >= cutoff)
     const completed = day.filter((entry) => entry.ms !== null)
     const failed = day.filter((entry) => entry.status >= 400)
     const sum = (list, key) => list.reduce((total, entry) => total + (Number(entry[key]) || 0), 0)
@@ -172,7 +203,7 @@ export class RequestLog {
     const cachedTokens = sum(day, 'cachedTokens')
     const reasoningTokens = sum(day, 'reasoningTokens')
     return {
-      total: this.entries.length,
+      total: source.length,
       last24h: day.length,
       failed24h: failed.length,
       successRate: completed.length ? Math.round((1 - failed.length / completed.length) * 1000) / 10 : null,
@@ -197,8 +228,9 @@ export class RequestLog {
     const hourCount = Math.max(1, Math.min(Number(hours) || 24, 168))
     const now = Date.now()
     const span = hourCount * 3600000
+    const source = this.#allEntries()
     const populated = new Set()
-    for (const entry of this.entries) {
+    for (const entry of source) {
       if (entry.at >= now - span) populated.add(Math.floor(entry.at / 3600000))
     }
     // Choose granularity: keep at least ~6 buckets populated when traffic is sparse.
@@ -209,7 +241,7 @@ export class RequestLog {
     const byHour = Array.from({ length: bucketCount }, (_, index) => ({
       at: start + index * width, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, failed: 0,
     }))
-    for (const entry of this.entries) {
+    for (const entry of source) {
       if (entry.at < start) continue
       const model = entry.model || 'unknown'
       const row = byModel.get(model) || { model, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, ms: 0, failed: 0 }

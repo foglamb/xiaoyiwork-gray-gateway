@@ -5,7 +5,7 @@ import StatCard from './StatCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import AppIcon from './AppIcon.vue'
 import { state, logStats, hourly, byModel, bucketMs, accounts } from '../composables/useDashboard.js'
-import { compact, num, pct, ms } from '../composables/useFormat.js'
+import { compact, exact, num, pct, ms } from '../composables/useFormat.js'
 
 const metric = shallowRef('tokens')
 const hours = shallowRef(24)
@@ -76,7 +76,12 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
     <section class="stats">
       <StatCard label="近 24 小时请求" :value="num(logStats.last24h || 0)" :hint="`成功率 ${pct(logStats.successRate)}`" icon="pulse" />
       <StatCard label="缓存命中率" :value="pct(logStats.cacheHitRate)" hint="命中 / 输入 Token" tone="ok" icon="spark" />
-      <StatCard label="总 Token" :value="compact(logStats.tokens24h || 0)" :hint="`输入 ${compact(logStats.promptTokens24h)}`" tone="accent" icon="box" />
+      <StatCard
+        label="总 Token" :value="compact(logStats.tokens24h || 0)"
+        :hint="`输入 ${compact(logStats.promptTokens24h)} + 输出 ${compact(logStats.completionTokens24h)}`"
+        :title="`输入 ${exact(logStats.promptTokens24h)} + 输出 ${exact(logStats.completionTokens24h)} = ${exact(logStats.tokens24h)}`"
+        tone="accent" icon="box"
+      />
       <StatCard label="推理 Token" :value="compact(logStats.reasoningTokens24h || 0)" hint="思考链消耗" icon="spark" />
       <StatCard
         label="平均耗时" :value="ms(logStats.averageMs)"
@@ -110,7 +115,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
           <b v-if="metric !== 'cache'">{{ compact(legendValue(line.key)) }}</b>
         </span>
         <span class="grow" />
-        <span class="legend-note">{{ compact(totals.cached) }} / {{ compact(totals.prompt) }} 命中</span>
+        <span class="legend-note">命中 {{ compact(totals.cached) }} / 输入 {{ compact(totals.prompt) }}</span>
       </div>
 
       <div class="chart-body">
