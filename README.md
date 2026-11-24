@@ -122,13 +122,37 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 | 技术栈 | Vue 3.5 + Vite 7，Composition API，无 UI 框架依赖 |
 | 产物 | `app.js` ≈126KB（gzip 48KB）+ `app.css` ≈28KB（gzip 6KB），单文件 |
 | CSP | 仍为 `script-src 'self'`，产物无 `eval` / `new Function` / 内联脚本 |
-| 页面 | 总览、账号池、模型、请求记录、设置 |
+| 页面 | 总览、灰度控制台、账号池、模型、请求记录、设置 |
 | 图表 | 自绘 SVG 折线图，时间横轴、多序列、悬停读数、6h/24h/72h 与指标切换 |
 | 主题 | 深色/浅色，跟随系统偏好，选择持久化到 localStorage |
 | 响应式 | ≤860px 侧栏变底部导航，实测 390px 无横向溢出 |
 
 界面约定：管理密钥只存 `sessionStorage`；数据每 20 秒轮询一次，页面隐藏时暂停，
 刷新可关闭；请求记录每页 50 条，可翻页与展开单条明细。
+
+### 灰度控制台
+
+界面对应 `POST /_admin/gray`（热更新，无需重启），可调：
+
+| 控件 | 作用 |
+|---|---|
+| 启用开关 | 关闭时全部流量走稳定池，不影响在途请求 |
+| 比例滑块 + 快捷档 | 0 / 1 / 5 / 10 / 25 / 50 / 100%，写回 `gray.percentage` |
+| 目标池 | 命中灰度的流量落到 `gray` 或 `stable` 池 |
+| salt | 分桶盐值，修改后所有客户端重新分组 |
+| Header / Cookie 覆盖 | 是否允许 `X-Gray-Force`、`gray_force` 强制指定 |
+| 影子模式 | 只记录命中结果，不真正切换账号池 |
+| 强制灰度 / 稳定名单 | 按身份强制分流，优先级高于比例 |
+| 对外暴露灰度模型 | 控制 `/v1/models` 是否列出灰度模型 |
+| 分流预览 | 浏览器内用与服务端**完全相同**的 SHA256 分桶演算，验证某身份落点 |
+
+灰度页显示稳定/灰度实时请求分布；所有改动先在草稿里暂存，点「保存并热更新」才提交。
+
+### 运行调优（设置页）
+
+`POST /api/settings` 支持热更新：`requestTimeoutMs`、`maxBodyBytes`、`allowPanelFromLan`、
+`accountProbeMinutes`、`streamHeartbeatMs`、`logMaxEntries`、`grayModels`。
+`port` / `listen` / `upstreamUrl` 修改后需重启。
 
 ## 稳定性与可观测
 
@@ -259,6 +283,8 @@ print(answer.choices[0].message.content)
 | GET/POST | `/api/keys` | 本机 + Admin key | 查看/轮换访问密钥 |
 | POST/DELETE | `/api/accounts`、`/api/accounts/:id` | 本机 + Admin key | 添加/删除账号 |
 | POST | `/api/accounts/:id/quota` | 本机 + Admin key | 查询积分与权益包 |
+| POST | `/_admin/gray` | Admin key | 灰度热更新（比例/名单/覆盖/影子） |
+| POST | `/api/settings` | 本机 + Admin key | 热更新超时、体积上限、探活、心跳、日志上限、灰度模型 |
 | GET | `/api/logs` | 本机 + Admin key | 分页请求日志 + 统计 + 图表聚合 |
 | POST | `/api/logs/clear` | 本机 + Admin key | 清空请求记录 |
 | POST | `/api/auth/oauth/start` | 本机 + Admin key | 发起华为账号 OAuth 登录 |

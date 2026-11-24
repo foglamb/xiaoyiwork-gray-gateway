@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, shallowRef } from 'vue'
+import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CodeBlock from './CodeBlock.vue'
 import { state, refreshAll } from '../composables/useDashboard.js'
@@ -8,12 +8,46 @@ import { notify } from '../composables/useToast.js'
 
 const emit = defineEmits(['logout', 'changed'])
 const keys = shallowRef({ apiKey: '', adminKey: '' })
+const tune = ref({
+  requestTimeoutMs: 120000, maxBodyBytes: 10485760, accountProbeMinutes: 15,
+  streamHeartbeatMs: 15000, logMaxEntries: 1000, allowPanelFromLan: false, grayModelIds: [],
+})
+const savingTune = shallowRef(false)
+const allModels = computed(() => state.value?.models || [])
 const draft = shallowRef({ apiKey: '', adminKey: '' })
 const busy = shallowRef(false)
 const revealed = shallowRef(false)
 
 const baseUrl = computed(() => state.value?.endpoint?.currentUrl || '')
 const lanUrls = computed(() => state.value?.endpoint?.lanUrls || [])
+
+function syncTune() {
+  const s = state.value?.settings
+  if (!s) return
+  tune.value = {
+    requestTimeoutMs: state.value.requestTimeoutMs ?? 120000,
+    maxBodyBytes: s.maxBodyBytes ?? 10485760,
+    accountProbeMinutes: s.accountProbeMinutes ?? 0,
+    streamHeartbeatMs: s.streamHeartbeatMs ?? 15000,
+    logMaxEntries: s.logMaxEntries ?? 1000,
+    allowPanelFromLan: Boolean(s.allowPanelFromLan),
+    grayModelIds: [...(s.grayModelIds || [])],
+  }
+}
+watch(() => state.value?.settings, syncTune, { immediate: true, deep: true })
+
+async function saveTune() {
+  savingTune.value = true
+  try {
+    await api('/api/settings', { method: 'POST', body: tune.value })
+    notify('运行参数已保存并生效', 'ok')
+    emit('changed')
+  } catch (error) {
+    notify(error.message, 'err')
+  } finally {
+    savingTune.value = false
+  }
+}
 
 onMounted(async () => {
   try {
@@ -125,6 +159,68 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
     </section>
 
     <section class="card card-pad">
+      <span class="kicker">Tuning</span>
+      <h3 class="mt">运行调优</h3>
+      <p class="muted tiny mb">这些参数保存后立即生效，无需重启。</p>
+      <div class="tune-grid">
+        <div class="field">
+          <label>请求超时 requestTimeoutMs</label>
+          <input v-model.number="tune.requestTimeoutMs" class="input" type="number" min="1000" step="1000" />
+          <span class="muted tiny">流式请求的总超时，思考型模型建议 ≥ 120000</span>
+        </div>
+        <div class="field">
+          <label>请求体上限 maxBodyBytes</label>
+          <input v-model.number="tune.maxBodyBytes" class="input" type="number" min="1024" step="1024" />
+          <span class="muted tiny">约 {{ (tune.maxBodyBytes / 1048576).toFixed(1) }} MB</span>
+        </div>
+        <div class="field">
+          <label>账号探活间隔 accountProbeMinutes</label>
+          <input v-model.number="tune.accountProbeMinutes" class="input" type="number" min="0" step="1" />
+          <span class="muted tiny">0 = 关闭定时探活</span>
+        </div>
+        <div class="field">
+          <label>流式心跳 streamHeartbeatMs</label>
+          <input v-model.number="tune.streamHeartbeatMs" class="input" type="number" min="0" step="1000" />
+          <span class="muted tiny">上游静默多久注入 keepalive，0 = 关闭</span>
+        </div>
+        <div class="field">
+          <label>日志保留条数 logMaxEntries</label>
+          <input v-model.number="tune.logMaxEntries" class="input" type="number" min="50" max="5000" step="50" />
+          <span class="muted tiny">钳制在 50–5000</span>
+        </div>
+        <div class="field">
+          <label>面板局域网访问</label>
+          <label class="inline-check">
+            <input v-model="tune.allowPanelFromLan" type="checkbox" />
+            <span>允许局域网打开面板</span>
+          </label>
+          <span class="muted tiny">关闭后仅本机可访问管理面板</span>
+        </div>
+      </div>
+      <div class="row save-row">
+        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">
+          {{ savingTune ? '保存中…' : '保存调优' }}
+        </button>
+        <span class="muted tiny">端口、监听地址与上游地址需改配置文件并重启</span>
+      </div>
+    </section>
+
+    <section class="card card-pad">
+      <span class="kicker">Models</span>
+      <h3 class="mt">灰度模型白名单</h3>
+      <p class="muted tiny mb">勾选的模型默认不对普通请求开放，需在灰度控制台里决定是否对外暴露。</p>
+      <div class="model-pick">
+        <label v-for="m in allModels" :key="m.id" class="pick" :class="{ on: tune.grayModelIds.includes(m.id) }">
+          <input v-model="tune.grayModelIds" type="checkbox" :value="m.id" />
+          <span>{{ m.name || m.id }}</span>
+        </label>
+      </div>
+      <div class="row save-row">
+        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">保存模型白名单</button>
+      </div>
+    </section>
+
+    <section class="card card-pad">
       <span class="kicker">RUNTIME</span>
       <h3 class="mt">运行状态</h3>
       <div class="runtime">
@@ -163,8 +259,23 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
 .runtime span { font-size: 10.5px; color: var(--dim); }
 .runtime b { font-size: 12.5px; font-family: var(--font-mono); font-weight: 600; color: var(--text-2); }
 .danger-zone { border-color: color-mix(in srgb, var(--red) 26%, var(--line)); }
+.tune-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 15px; }
+.inline-check { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); cursor: pointer; height: 36px; }
+.inline-check input { accent-color: var(--accent); }
+.model-pick { display: flex; flex-wrap: wrap; gap: 7px; }
+.pick {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 6px 11px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--surface-2);
+  font-size: 11.5px; color: var(--dim);
+  transition: all var(--dur-1) var(--ease);
+}
+.pick input { display: none; }
+.pick:hover { border-color: var(--line-strong); color: var(--text-2); }
+.pick.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-2); font-weight: 600; }
 
 @media (max-width: 720px) {
+  .tune-grid { grid-template-columns: minmax(0, 1fr); }
   .key-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .card-pad { padding: 16px; }
   .two { grid-template-columns: minmax(0, 1fr); }

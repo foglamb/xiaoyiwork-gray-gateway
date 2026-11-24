@@ -251,6 +251,14 @@ export function createProxyServer(config, {
         },
         models: MODEL_LIST.map(([id, name]) => ({ id, name, gray: GRAY_MODELS.has(id) || runtime.config.grayModels.includes(id), rate: modelRate(id), vision: modelVision(id) })),
         requestTimeoutMs: runtime.config.requestTimeoutMs,
+        settings: {
+          maxBodyBytes: runtime.config.maxBodyBytes,
+          allowPanelFromLan: runtime.config.allowPanelFromLan,
+          accountProbeMinutes: runtime.config.accountProbeMinutes ?? 0,
+          streamHeartbeatMs: runtime.config.streamHeartbeatMs ?? 15000,
+          logMaxEntries: runtime.config.logMaxEntries ?? 1000,
+          grayModelIds: runtime.config.grayModels || [],
+        },
       })
       return
     }
@@ -384,12 +392,37 @@ export function createProxyServer(config, {
     if (request.method === 'POST' && url.pathname === '/api/settings') {
       const input = await readJsonBody(request, 16384)
       const candidate = structuredClone(runtime.config)
+      // Runtime-tunable keys. Port/listen/upstream need a restart, so they stay out.
       for (const key of ['requestTimeoutMs', 'maxBodyBytes', 'allowPanelFromLan']) {
         if (input[key] !== undefined) candidate[key] = input[key]
       }
+      for (const key of ['accountProbeMinutes', 'streamHeartbeatMs', 'logMaxEntries']) {
+        if (input[key] !== undefined) {
+          const value = Number(input[key])
+          if (!Number.isFinite(value) || value < 0) throw new HttpError(400, `${key} 必须是非负数字`, 'invalid_config_patch')
+          candidate[key] = value
+        }
+      }
+      if (input.grayModels !== undefined) {
+        if (!Array.isArray(input.grayModels) || input.grayModels.some((v) => typeof v !== 'string')) {
+          throw new HttpError(400, 'grayModels 必须是字符串数组', 'invalid_config_patch')
+        }
+        candidate.grayModels = input.grayModels
+      }
       validateConfig(candidate)
       await persistRuntimeConfig(candidate)
-      sendJson(response, 200, { ok: true, requestTimeoutMs: candidate.requestTimeoutMs, maxBodyBytes: candidate.maxBodyBytes, allowPanelFromLan: candidate.allowPanelFromLan })
+      installRuntime(candidate)
+      sendJson(response, 200, {
+        ok: true,
+        requestTimeoutMs: candidate.requestTimeoutMs,
+        maxBodyBytes: candidate.maxBodyBytes,
+        allowPanelFromLan: candidate.allowPanelFromLan,
+        accountProbeMinutes: candidate.accountProbeMinutes ?? 0,
+        streamHeartbeatMs: candidate.streamHeartbeatMs ?? 15000,
+        logMaxEntries: candidate.logMaxEntries ?? 1000,
+        grayModels: candidate.grayModels || [],
+        restartRequired: [],
+      })
       return
     }
 

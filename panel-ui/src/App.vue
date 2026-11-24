@@ -3,6 +3,7 @@ import { computed, onMounted, shallowRef, watch } from 'vue'
 import AppShell from './components/AppShell.vue'
 import LoginView from './components/LoginView.vue'
 import OverviewView from './components/OverviewView.vue'
+import GrayView from './components/GrayView.vue'
 import AccountsView from './components/AccountsView.vue'
 import ModelsView from './components/ModelsView.vue'
 import LogsView from './components/LogsView.vue'
@@ -20,6 +21,7 @@ const autoRefresh = shallowRef(true)
 
 const tabs = computed(() => [
   { id: 'overview', label: '总览', hint: '流量、Token 与缓存一目了然', icon: 'overview' },
+  { id: 'gray', label: '灰度', hint: '按比例分流、覆盖规则与分桶预览', icon: 'spark' },
   { id: 'accounts', label: '账号池', hint: '稳定池与灰度池的账号与余额', icon: 'accounts', badge: state.value?.accounts?.length },
   { id: 'models', label: '模型', hint: '可用模型与能力', icon: 'models', badge: state.value?.models?.length },
   { id: 'logs', label: '请求记录', hint: '逐条查看调用、延迟与 Token 构成', icon: 'logs' },
@@ -78,6 +80,7 @@ onMounted(boot)
     @update:active="tab = $event" @refresh="manualRefresh" @logout="logout"
   >
     <OverviewView v-if="tab === 'overview'" />
+    <GrayView v-else-if="tab === 'gray'" @saved="manualRefresh" />
     <AccountsView v-else-if="tab === 'accounts'" :gray="state?.gray || {}" @changed="manualRefresh" />
     <ModelsView v-else-if="tab === 'models'" />
     <LogsView v-else-if="tab === 'logs'" v-model:polling="autoRefresh" />
