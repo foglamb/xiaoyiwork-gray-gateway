@@ -149,11 +149,12 @@ export class ModelCatalog {
       this.status = { ok: true, source: 'upstream', message: `已从上游获取 ${models.length} 个模型`, refreshedAt: new Date().toISOString() }
       this.#save()
     } catch (error) {
-      const sessionHint = this.cookie ? '网页目录会话可能已过期，请重新授权' : '尚未配置网页版目录会话'
+      const featureDisabled = error.message.includes('未开放')
+      const sessionHint = featureDisabled ? '' : (this.cookie ? '网页目录会话可能已过期，请重新授权' : '尚未配置网页版目录会话')
       this.status = {
         ok: false,
         source: this.upstream.length ? 'upstream-cache' : 'observed-config',
-        message: `上游目录暂不可用：${error.message}；${sessionHint}`,
+        message: `上游目录暂不可用：${error.message}${sessionHint ? `；${sessionHint}` : ''}`,
         refreshedAt: new Date().toISOString(),
       }
     }
@@ -167,7 +168,22 @@ export class ModelCatalog {
       signal: AbortSignal.timeout(12000),
     })
     if (!page.ok) throw new Error(`模型会话初始化 HTTP ${page.status}`)
-    await page.arrayBuffer()
+    const html = await page.text()
+    // The Work catalogue is gated by the upstream web-agent configuration.
+    // With the feature disabled, /chat/work redirects home and the internal
+    // endpoint returns 404 even with a completely valid logged-in cookie.
+    const common = html.match(/<script[^>]*id=["']common["'][^>]*>([\s\S]*?)<\/script>/i)
+    if (common) {
+      try {
+        const config = JSON.parse(common[1])?.config || {}
+        const work = (config.webAgents || []).find((agent) => agent.type === 'claw')
+        if (work && (work.enableAgent === false || work.enableFeature === false)) {
+          throw new Error('当前网页配置未开放小艺Work Web（enableAgent=false）')
+        }
+      } catch (error) {
+        if (error.message.includes('未开放')) throw error
+      }
+    }
     for (const [name, value] of cookiePairs(page.headers.getSetCookie?.() || [])) jar.set(name, value)
     const csrf = jar.get('xy_csrf_token')
     if (!csrf) throw new Error('上游未返回 CSRF 会话')

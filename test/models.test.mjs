@@ -87,3 +87,16 @@ test('web model session persists privately, restores cache and redacts cookie', 
   assert.equal((await readFile(savedPath, 'utf8')).includes('private-web-cookie'), false)
   assert.equal(restored.list(config).some((model) => model.id === 'Real_Kimi'), true)
 })
+
+test('disabled Work web agent reports the real feature gate instead of cookie expiry', async () => {
+  const calls = []
+  const html = `<script type="application/json" id="common">${JSON.stringify({ config: { webAgents: [{ type: 'claw', enableAgent: false, enableFeature: false }] } })}</script>`
+  const catalog = new ModelCatalog({ fetchImpl: async (url) => {
+    calls.push(String(url))
+    return new Response(html, { status: 200, headers: { 'set-cookie': 'xy_csrf_token=csrf; path=/' } })
+  } })
+  await catalog.importSession({ cookie: 'xy_csrf_token=csrf; web_login=valid-login' })
+  assert.match(catalog.publicStatus().message, /enableAgent=false/)
+  assert.doesNotMatch(catalog.publicStatus().message, /过期/)
+  assert.equal(calls.some((url) => url.includes('getWorkModelList')), false)
+})

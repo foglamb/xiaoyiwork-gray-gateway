@@ -185,6 +185,8 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 服务端保存到配置目录的 `model-catalog-session.json`，写入后强制执行 `0600`。
 Cookie 不进入日志、状态接口或 Git 仓库；清除会话不会删除已验证的上游缓存。
 会话过期只影响目录刷新，不影响聊天、灰度或余额接口。
+若上游 `common` 配置中的小艺Work代理为 `enableAgent=false`，面板会直接报告
+“当前网页配置未开放小艺Work Web”，不会再把功能关闭误报为 Cookie 过期。
 
 ### 灰度控制台
 
