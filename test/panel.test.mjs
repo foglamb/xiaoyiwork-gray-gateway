@@ -69,8 +69,9 @@ test('state exposes account pool metadata and model information without secrets'
   const response = await fetch(`${base}/api/state`, { headers: admin })
   const data = await response.json()
   assert.equal(data.accounts.length, 2)
-  assert.equal(data.models.length, 8)
-  assert.equal(data.models.find((model) => model.id === 'Kimi_K3.1_Pro_VE').rate, '13x')
+  assert.ok(data.models.length >= 1)
+  assert.equal(data.models.find((model) => model.id === 'Kimi_K3.1_Pro_VE').rate, 0)
+  assert.equal(data.models.find((model) => model.id === 'Kimi_K3.1_Pro_VE').source, 'config')
   assert.equal(data.models.find((model) => model.id === 'Kimi_K3.1_Pro_VE').gray, true)
   assert.equal(data.accounts.find((account) => account.id === 'gray-A').hasRefreshToken, true)
   assert.ok(data.endpoint.baseUrl.endsWith('/v1'))
@@ -129,8 +130,8 @@ test('quota UI endpoint calls both billing APIs and returns only parsed quota', 
   assert.equal(data.quota.plan, '体验版')
   assert.equal(data.quota.windows[0].remaining, 200)
   assert.equal(data.quota.windows[1].remaining, 1000)
-  assert.equal(urls.length, 2)
-  assert.ok(urls.every((entry) => entry.init.headers['x-prd-pkg-name'] === 'com.huawei.hmos.vassistant'))
+  assert.equal(urls.filter((entry) => String(entry.url).includes('/ability-billing/')).length, 2)
+  assert.ok(urls.filter((entry) => String(entry.url).includes('/ability-billing/')).every((entry) => entry.init.headers['x-prd-pkg-name'] === 'com.huawei.hmos.vassistant'))
 })
 
 test('request log records route, duration, tokens but no prompts or credentials', async (t) => {

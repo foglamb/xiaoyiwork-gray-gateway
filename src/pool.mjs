@@ -381,14 +381,3 @@ export class AccountPool {
     }
   }
 }
-
-export const MODEL_LIST = [
-  ['LLM_DeepSeekV4_Think', 'DeepSeek-V4-Flash'],
-  ['DeepSeek_V4.1_Flash_VE', 'DeepSeek-V4.1-Flash'],
-  ['LLM_GLM5.3', 'GLM-5.3'],
-  ['GLM_5.3_FLASH_VE', 'GLM-5.3-Flash'],
-  ['MiniMax_M3.1_Flash', 'MiniMax M3.1 Flash'],
-  ['Kimi_K3.1_Pro_VE', 'Kimi K3.1 Pro（灰度）'],
-  ['OpenPanguV2-Pro', 'openPangu-2.1-Pro'],
-  ['Auto-Model', 'Auto-Model'],
-]

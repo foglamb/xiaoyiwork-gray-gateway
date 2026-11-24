@@ -82,7 +82,7 @@ onMounted(boot)
     <OverviewView v-if="tab === 'overview'" />
     <GrayView v-else-if="tab === 'gray'" @saved="manualRefresh" />
     <AccountsView v-else-if="tab === 'accounts'" :gray="state?.gray || {}" @changed="manualRefresh" />
-    <ModelsView v-else-if="tab === 'models'" />
+    <ModelsView v-else-if="tab === 'models'" @changed="manualRefresh" />
     <LogsView v-else-if="tab === 'logs'" v-model:polling="autoRefresh" />
     <SettingsView v-else-if="tab === 'settings'" @logout="logout" @changed="manualRefresh" />
   </AppShell>

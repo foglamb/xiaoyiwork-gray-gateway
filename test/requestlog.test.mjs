@@ -164,3 +164,29 @@ test('stats honours the requested window instead of always using 24h', async () 
     assert.equal(charted, log.stats(hours).tokens24h, `chart matches KPI for ${hours}h`)
   }
 })
+
+test('72h reads records beyond 24h even after they leave the memory ring', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'xiaoyi-log-72h-'))
+  const configPath = join(dir, 'config.json')
+  await writeFile(configPath, '{}\n')
+  const now = Date.now()
+  const rows = [
+    { id: 'older-than-24h', at: now - 60 * 3600000, status: 200, ms: 10, model: 'm', promptTokens: 600, completionTokens: 100, totalTokens: 700, cachedTokens: 0, reasoningTokens: 0 },
+    ...Array.from({ length: 55 }, (_, i) => ({
+      id: `new-${i}`, at: now - i * 1000, status: 200, ms: 10, model: 'm',
+      promptTokens: 10, completionTokens: 0, totalTokens: 10, cachedTokens: 0, reasoningTokens: 0,
+    })),
+  ]
+  await writeFile(join(dir, 'requests.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const log = new RequestLog({ configPath, maxEntries: 50 })
+  assert.equal(log.entries.length, 50)
+  assert.equal(log.entries.some((entry) => entry.id === 'older-than-24h'), false)
+  assert.equal(log.stats(24).tokens24h, 550)
+  assert.equal(log.stats(72).tokens24h, 1250, '72h includes the 60h-old record')
+  assert.equal(log.stats(72).allTimeTokens, 1250)
+  const chart = log.breakdown(72)
+  assert.ok(chart.byHour[0].at <= now - 71 * 3600000, '72h chart retains its full time axis')
+})

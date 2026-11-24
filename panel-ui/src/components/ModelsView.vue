@@ -1,10 +1,24 @@
 <script setup>
 import { computed, shallowRef } from 'vue'
 import AppIcon from './AppIcon.vue'
-import { models } from '../composables/useDashboard.js'
+import { models, state } from '../composables/useDashboard.js'
+import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 
+const emit = defineEmits(['changed'])
 const query = shallowRef('')
+const refreshing = shallowRef(false)
+const catalog = computed(() => state.value?.modelCatalog || {})
+const sourceLabel = { upstream: '上游', observed: '调用记录', config: '配置', 'upstream-cache': '上游缓存' }
+
+async function refreshModels() {
+  refreshing.value = true
+  try {
+    const result = await api('/api/models/refresh', { method: 'POST', body: {} })
+    notify(result.status.message, result.status.ok ? 'ok' : 'info')
+    emit('changed')
+  } catch (error) { notify(error.message, 'err') } finally { refreshing.value = false }
+}
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -26,6 +40,12 @@ async function copy(id) {
         <input v-model="query" class="input search" placeholder="搜索模型 ID 或名称…" spellcheck="false" />
       </div>
       <span class="muted tiny">{{ filtered.length }} / {{ models.length }} 个模型</span>
+      <button class="btn btn-sm" type="button" :disabled="refreshing" @click="refreshModels">
+        <AppIcon name="refresh" :size="12" /> {{ refreshing ? '刷新中…' : '从上游刷新' }}
+      </button>
+    </div>
+    <div class="catalog-note" :class="{ warn: catalog.ok === false }">
+      {{ catalog.message || '模型目录准备中' }}；标记为「调用记录」的模型来自真实请求，不是上游目录。
     </div>
 
     <div class="grid">
@@ -37,7 +57,7 @@ async function copy(id) {
         <code class="model-id truncate">{{ model.id }}</code>
         <div class="model-meta">
           <span v-if="model.vision" class="badge info">视觉</span>
-          <span v-if="model.rate" class="badge">{{ model.rate }}</span>
+          <span class="badge">{{ sourceLabel[model.source] || model.source || '记录' }}</span>
           <span class="grow" />
           <span class="copy-hint"><AppIcon name="copy" :size="11" /> 复制</span>
         </div>
@@ -61,6 +81,8 @@ async function copy(id) {
 .model-head strong { font-size: 12.5px; font-weight: 620; }
 .model-id { font-size: 10.5px; color: var(--dim); }
 .model-meta { display: flex; align-items: center; gap: 5px; }
+.catalog-note { padding: 0 2px; font-size: 11px; color: var(--dim); line-height: 1.55; }
+.catalog-note.warn { color: var(--amber); }
 .copy-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim-2); opacity: 0; transition: opacity var(--dur-1) var(--ease); }
 .model:hover .copy-hint { opacity: 1; }
 </style>

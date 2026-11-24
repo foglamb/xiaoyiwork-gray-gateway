@@ -37,7 +37,9 @@ const PAD = computed(() => (narrow.value
 const plotW = computed(() => W.value - PAD.value.left - PAD.value.right)
 const plotH = computed(() => height.value - PAD.value.top - PAD.value.bottom)
 
-const visible = computed(() => props.points.filter((p) => (p.requests || 0) > 0 || props.yFormat === 'percent'))
+// Keep empty buckets: they are part of the selected time axis. Filtering them
+// made a 72h chart collapse into the shorter period that contained traffic.
+const visible = computed(() => props.points.filter((point) => point && Number.isFinite(point.at)))
 
 function nice(value) {
   if (!value || value <= 0) return 1
@@ -109,6 +111,12 @@ const grid = computed(() => [0, 0.25, 0.5, 0.75, 1].map((f) => ({
 })))
 
 const tickEvery = computed(() => Math.max(1, Math.ceil(visible.value.length / 7)))
+function showTick(index) {
+  const last = visible.value.length - 1
+  if (index === last) return true
+  // Do not print a regular tick immediately next to the final timestamp.
+  return index % tickEvery.value === 0 && last - index >= Math.max(2, tickEvery.value * 0.65)
+}
 
 /**
  * Freeze the hovered values into the snapshot. Reading them back from the live
@@ -199,7 +207,7 @@ function hoverY(key) {
       <g>
         <text
           v-for="(point, index) in visible" :key="`x${index}`"
-          v-show="index % tickEvery === 0 || index === visible.length - 1"
+          v-show="showTick(index)"
           :x="xAt(index, visible.length)" :y="height - 9" class="axis" text-anchor="middle"
         >{{ label(point.at) }}</text>
       </g>

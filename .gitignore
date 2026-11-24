@@ -7,3 +7,6 @@ config/requests.jsonl
 .env
 .DS_Store
 artifacts/
+
+# Local Docker image exports
+deliverables/

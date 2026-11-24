@@ -167,35 +167,41 @@ export class RequestLog {
    * The ring only exists for paging, so using it here made the 24h totals
    * shrink as new requests pushed old entries out.
    */
-  #allEntries() {
-    if (!this.persist) return this.entries
-    const cutoff = Date.now() - 86400000
+  #allEntries({ since = 0 } = {}) {
+    if (!this.persist) return this.entries.filter((entry) => entry.at >= since)
     const seen = new Set()
     const out = []
     const collect = (list) => {
       for (const entry of list) {
-        if (!entry || entry.flushed || entry.id && seen.has(entry.id)) continue
+        if (!entry || entry.flushed || entry.at < since) continue
+        if (entry.id && seen.has(entry.id)) continue
         if (entry.id) seen.add(entry.id)
         out.push(entry)
       }
     }
-    // Current segment first, then older segments while they stay in the window.
     collect(this.entries)
+    // Read every retained segment within the requested window. Previously the
+    // cutoff was hard-coded to 24h, which made 72h silently discard older data.
     for (let index = this.segment; index >= 0 && index >= this.segment - 2; index--) {
       let text = ''
       try { text = readFileSync(this.#segmentPath(index), 'utf8') } catch { continue }
-      const list = text.split('\n').filter(Boolean)
-        .map((line) => { try { return JSON.parse(line) } catch { return null } })
-        .filter((entry) => entry && !entry.flushed && entry.at >= cutoff)
-      collect(list)
+      collect(text.split('\n').filter(Boolean).map((line) => {
+        try { return JSON.parse(line) } catch { return null }
+      }))
     }
     return out
+  }
+
+  modelIds() {
+    return [...new Set(this.#allEntries().map((entry) => entry.model).filter(Boolean))]
   }
 
   stats(hours = 24) {
     const windowHours = Math.max(1, Math.min(Number(hours) || 24, 168))
     const cutoff = Date.now() - windowHours * 3600000
-    const source = this.#allEntries()
+    const source = this.#allEntries({ since: cutoff })
+    const all = this.#allEntries()
+    const allDates = all.map((entry) => entry.at).filter(Number.isFinite)
     const day = source.filter((entry) => entry.at >= cutoff)
     const completed = day.filter((entry) => entry.ms !== null)
     const failed = day.filter((entry) => entry.status >= 400)
@@ -217,6 +223,13 @@ export class RequestLog {
       // Cache hit rate = cached prompt tokens / all prompt tokens observed.
       // Two decimals: a single 512-token hit against a large token total must not read as 0%.
       cacheHitRate: promptTokens > 0 ? roundRate(cachedTokens / promptTokens) : null,
+      windowHours,
+      oldestAt: allDates.length ? Math.min(...allDates) : null,
+      newestAt: allDates.length ? Math.max(...allDates) : null,
+      allTimeRequests: all.length,
+      allTimeTokens: sum(all, 'totalTokens'),
+      allTimePromptTokens: sum(all, 'promptTokens'),
+      allTimeCompletionTokens: sum(all, 'completionTokens'),
     }
   }
 
@@ -229,13 +242,18 @@ export class RequestLog {
     const hourCount = Math.max(1, Math.min(Number(hours) || 24, 168))
     const now = Date.now()
     const span = hourCount * 3600000
-    const source = this.#allEntries()
+    const source = this.#allEntries({ since: now - span })
     const populated = new Set()
     for (const entry of source) {
       if (entry.at >= now - span) populated.add(Math.floor(entry.at / 3600000))
     }
     // Choose granularity: keep at least ~6 buckets populated when traffic is sparse.
-    const width = bucketMs || (populated.size <= 2 ? 5 * 60000 : populated.size <= 8 ? 15 * 60000 : 3600000)
+    const adaptiveWidth = populated.size <= 2 ? 5 * 60000 : populated.size <= 8 ? 15 * 60000 : 3600000
+    // Multi-day windows must not shrink below the 288-bucket budget: 5-minute
+    // buckets over 72h would otherwise cover only the most recent 24h.
+    const width = bucketMs || (hourCount > 24
+      ? Math.max(adaptiveWidth, Math.ceil(span / 288))
+      : adaptiveWidth)
     const bucketCount = Math.max(1, Math.min(Math.ceil(span / width), 288))
     const start = now - bucketCount * width
     const byModel = new Map()
@@ -265,26 +283,34 @@ export class RequestLog {
       hour.total += Number(entry.totalTokens) || 0
       if (entry.status >= 400) hour.failed++
     }
-    // Focus the window on the region that actually has traffic so the series
-    // spans the plot instead of being one point at the far right edge.
-    const filledIndexes = byHour.map((bucket, index) => bucket.requests > 0 ? index : -1).filter((index) => index >= 0)
-    let focused = byHour
-    if (filledIndexes.length && filledIndexes.length < byHour.length) {
-      const padding = Math.max(2, Math.round(byHour.length * 0.08))
-      const from = Math.max(0, filledIndexes[0] - padding)
-      const to = Math.min(byHour.length - 1, filledIndexes[filledIndexes.length - 1] + padding)
-      focused = byHour.slice(from, to + 1)
+    // Short windows retain the compact focused view. Multi-day windows keep
+    // their complete axis so 72h cannot collapse into only the active hours.
+    let output = byHour
+    if (bucketMs || hourCount <= 24) {
+      const filled = byHour.map((bucket, index) => bucket.requests ? index : -1).filter((index) => index >= 0)
+      if (filled.length && filled.length < byHour.length) {
+        const padding = Math.max(2, Math.round(byHour.length * 0.08))
+        const from = Math.max(0, filled[0] - padding)
+        const to = Math.min(byHour.length - 1, filled[filled.length - 1] + padding)
+        output = byHour.slice(from, to + 1)
+      }
     }
     return {
       bucketMs: width,
-      bucketStart: focused[0]?.at ?? start,
-      buckets: focused.length,
+      bucketStart: output[0]?.at ?? start,
+      bucketEnd: now,
+      buckets: output.length,
       byModel: [...byModel.values()].map((row) => ({
         ...row,
         averageMs: row.requests ? Math.round(row.ms / row.requests) : null,
         cacheHitRate: row.prompt ? roundRate(row.cached / row.prompt) : null,
       })).sort((a, b) => b.requests - a.requests),
-      byHour: focused,
+      byHour: output,
+      coverage: {
+        requests: byHour.reduce((total, bucket) => total + bucket.requests, 0),
+        firstRequestAt: byHour.find((bucket) => bucket.requests)?.at || null,
+        lastRequestAt: [...byHour].reverse().find((bucket) => bucket.requests)?.at || null,
+      },
     }
   }
 }

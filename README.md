@@ -46,7 +46,7 @@ node src/cli.mjs --help
 | 灰度控制台 | 启用/停用、0–100% 滑块、1/5/10/25/100% 快捷档、一键回滚、稳定/灰度请求分布 |
 | 账号池 | 稳定/灰度分栏、**华为账号 OAuth 登录**、登录态导入、删除、自动续期、积分自动查询 |
 | 模型 | 模型卡片、ID 复制、倍率/视觉能力、灰度模型启停确认 |
-| 请求记录 | Token 趋势**折线图**（时间轴/指标切换/6h-24h-72h）、缓存命中率、模型明细表、分页日志 |
+| 请求记录 | Token 趋势折线图、模型总量**竖向堆叠柱图**、累计 Token、缓存命中率、分页日志 |
 | 设置 | API/Admin 密钥轮换、超时、Header/Cookie 灰度开关、客户端配置复制 |
 | 通用 | 深色/浅色主题、移动端布局、管理密钥仅保存于 sessionStorage |
 
@@ -131,9 +131,9 @@ Compose 默认只映射 `127.0.0.1:17356`；要局域网访问改成 `"17356:173
 - 输入 / 输出 / 合计 Token，来自上游 `usage`；
 - 缓存命中来自 `usage.prompt_tokens_details.cached_tokens`，命中率 = 命中 / 输入；
 - 推理 Token 来自 `usage.completion_tokens_details.reasoning_tokens`；
-- 图表为 SVG 折线图，横轴时间、纵轴 Token，服务端按数据密度自动选择 5 分钟/15 分钟/1 小时分桶，
-  并把窗口聚焦到有流量的时段；稀疏时只连真实采样点，不伪造空白区间；
-- 日志**分页**：每页 50 条（服务端上限 100），内存与磁盘保留上限 `logMaxEntries`（默认 1000，钳制 50–5000）；
+- 趋势图为 SVG 折线图，服务端按窗口与数据密度分桶；72h 保留完整 72 小时时间轴，不裁掉前置空窗；
+- 模型总量图使用竖向堆叠柱，柱高按当前窗口最大模型等比，分段展示缓存、未命中输入与输出；
+- 日志**分页**：默认每页 20 条，可选 10/20/50/100，内存与磁盘保留上限 `logMaxEntries`（默认 1000，钳制 50–5000）；
 - 自动刷新 15 秒，可关闭，页面隐藏时停止，数据未变化不重绘表格。
 
 **不做计费估算。** 网关只报告上游接口返回的余额原值，不按 Token×倍率推算扣费：
@@ -153,19 +153,31 @@ npm run build        # 产出 src/panel/{index.html,app.js,app.css}
 | 项 | 说明 |
 |---|---|
 | 技术栈 | Vue 3.5 + Vite 7，Composition API，无 UI 框架依赖 |
-| 产物 | `app.js` ≈126KB（gzip 48KB）+ `app.css` ≈28KB（gzip 6KB），单文件 |
+| 产物 | `app.js` ≈153KB（gzip 56KB）+ `app.css` ≈50KB（gzip 10KB），单文件 |
 | CSP | 仍为 `script-src 'self'`，产物无 `eval` / `new Function` / 内联脚本 |
 | 页面 | 总览、灰度控制台、账号池、模型、请求记录、设置 |
-| 图表 | 自绘 SVG 折线图，时间横轴、多序列、悬停读数、6h/24h/72h 与指标切换 |
+| 图表 | SVG 折线图 + CSS 竖向堆叠柱图，悬停读数、6h/24h/72h 与指标切换 |
 | 主题 | 深色/浅色，跟随系统偏好，选择持久化到 localStorage |
-| 响应式 | ≤860px 侧栏变底部导航，实测 390px 无横向溢出 |
+| 响应式 | ≤720px 侧栏变底部导航，实测 390px 无横向溢出 |
 
 统计口径：`/api/logs` 的 `stats` 与图表聚合都读取**磁盘上的全部记录**
-（当前段 + 回滚段，24 小时窗口），内存环形缓冲只用于页面分页。
-因此 24 小时总量不会因 `logMaxEntries` 淘汰旧记录而减少。
+（当前段 + 回滚段，按所选 6h/24h/72h 窗口过滤），内存环形缓冲只用于页面分页。
+窗口总量不会因 `logMaxEntries` 淘汰旧记录而减少；`allTimeTokens` 单独给出保留日志累计值。
 
 界面约定：管理密钥只存 `sessionStorage`；数据每 20 秒轮询一次，页面隐藏时暂停，
-刷新可关闭；请求记录每页 50 条，可翻页与展开单条明细。
+刷新可关闭；请求记录默认每页 20 条，可切换 10/20/50/100 并展开单条明细。
+
+### 模型目录来源
+
+不再在服务端写死模型 ID 清单。`ModelCatalog` 优先请求小艺 Work 的
+`getWorkModelList` 上游目录，使用响应里的 `modelName` / `modelValue`。
+若上游目录不可用，面板会**明确显示错误**，并退化为两类真实来源：
+
+- `observed`：保留日志中实际出现过的模型 ID；
+- `config`：灰度配置里显式登记的模型 ID。
+
+不会把回退数据伪装成上游目录。`POST /api/models/refresh` 可手动重新发现；
+所有模型的计费倍率均报告为 0，不估算费用。
 
 ### 灰度控制台
 
@@ -322,6 +334,7 @@ print(answer.choices[0].message.content)
 | POST | `/api/accounts/:id/quota` | 本机 + Admin key | 查询积分与权益包 |
 | POST | `/_admin/gray` | Admin key | 灰度热更新（比例/名单/覆盖/影子） |
 | POST | `/api/settings` | 本机 + Admin key | 热更新超时、体积上限、探活、心跳、日志上限、灰度模型 |
+| POST | `/api/models/refresh` | 本机 + Admin key | 重新获取上游模型目录，失败保留真实回退来源 |
 | GET | `/api/logs` | 本机 + Admin key | 分页请求日志 + 统计 + 图表聚合 |
 | POST | `/api/logs/clear` | 本机 + Admin key | 清空请求记录 |
 | POST | `/api/auth/oauth/start` | 本机 + Admin key | 发起华为账号 OAuth 登录 |

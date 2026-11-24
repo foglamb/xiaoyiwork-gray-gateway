@@ -1,7 +1,8 @@
 import http from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { AccountPool, MODEL_LIST } from './pool.mjs'
+import { AccountPool } from './pool.mjs'
+import { ModelCatalog } from './models.mjs'
 import { GRAY_MODELS, HttpError, apiAuthorized, publicConfig, routeGray, validateConfig } from './canary.mjs'
 import { RequestLog } from './requestlog.mjs'
 import { isLoopbackAddress, lanUrls, panelAuthorized } from './network.mjs'
@@ -72,6 +73,10 @@ export function createProxyServer(config, {
 } = {}) {
   let runtime = runtimeFrom(config, configPath, fetchImpl, persistConfig)
   const requestLog = new RequestLog({ configPath, persist: Boolean(configPath), maxEntries: config.logMaxEntries || 1000 })
+  const modelCatalog = new ModelCatalog({ fetchImpl, logger })
+  const observedModels = new Set(requestLog.modelIds())
+  const modelList = () => modelCatalog.list(runtime.config, [...observedModels])
+  modelCatalog.refresh().catch(() => {})
   const quotaCache = new Map()
   const quotaInflight = new Map()
   const quotaError = new Map()
@@ -249,7 +254,7 @@ export function createProxyServer(config, {
           accounts: quotaCache.size,
           totalAccounts: runtime.config.accounts.stable.length + runtime.config.accounts.gray.length,
         },
-        models: MODEL_LIST.map(([id, name]) => ({ id, name, gray: GRAY_MODELS.has(id) || runtime.config.grayModels.includes(id), rate: modelRate(id), vision: modelVision(id) })),
+        models: modelList(), modelCatalog: modelCatalog.status,
         requestTimeoutMs: runtime.config.requestTimeoutMs,
         settings: {
           maxBodyBytes: runtime.config.maxBodyBytes,
@@ -459,10 +464,15 @@ export function createProxyServer(config, {
       sendJson(response, 200, publicConfig(runtime.config, runtime.pool.stats))
       return
     }
+    if (request.method === 'POST' && url.pathname === '/api/models/refresh') {
+      const status = await modelCatalog.refresh({ force: true })
+      sendJson(response, 200, { ok: status.ok, status, models: modelList() })
+      return
+    }
     if (request.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
       const enabled = new Set([...GRAY_MODELS, ...(runtime.config.grayModels || []), ...(runtime.config.gray.models || [])])
-      const data = MODEL_LIST.filter(([id]) => runtime.config.allowGrayModels || !enabled.has(id)).map(([id, name]) => ({
-        id, object: 'model', created: 0, owned_by: 'xiaoyiwork', display_name: name,
+      const data = modelList().filter((model) => runtime.config.allowGrayModels || !enabled.has(model.id)).map((model) => ({
+        id: model.id, object: 'model', created: 0, owned_by: 'xiaoyiwork', display_name: model.name,
       }))
       sendJson(response, 200, { object: 'list', data })
       return
@@ -475,6 +485,7 @@ export function createProxyServer(config, {
       if (body.stream !== undefined && typeof body.stream !== 'boolean') {
         throw new HttpError(400, 'stream 必须是布尔值', 'invalid_request_error')
       }
+      observedModels.add(body.model)
       const route = routeGray(request, runtime.config, body)
       requestLog.begin({ id: requestId, model: body.model, stream: body.stream !== false, route })
       const controller = new AbortController()
@@ -506,7 +517,7 @@ export function createProxyServer(config, {
         response.end()
         recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
         requestLog.finish(requestId, {
-          status: upstreamResponse.status, accountId, usage, rate: modelRate(body.model),
+          status: upstreamResponse.status, accountId, usage, rate: 0,
           marks: { firstByteAt: runtime.pool.lastFirstByteAt || null, firstTokenAt: firstTokenAt || null },
         })
       } catch (error) {
@@ -625,10 +636,3 @@ function importAccount(text) {
   throw new HttpError(400, '只接受 JSON 登录态；不支持手工填接口凭据', 'invalid_import')
 }
 
-function modelRate(id) {
-  return ({ 'LLM_GLM5.3': '8x', 'GLM_5.3_FLASH_VE': '0.8x', 'Kimi_K3.1_Pro_VE': '13x' })[id] || (id === 'Auto-Model' ? '—' : '1x')
-}
-
-function modelVision(id) {
-  return ['DeepSeek_V4.1_Flash_VE', 'GLM_5.3_FLASH_VE', 'Kimi_K3.1_Pro_VE', 'MiniMax_M3.1_Flash'].includes(id)
-}

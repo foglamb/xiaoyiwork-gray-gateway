@@ -1,6 +1,7 @@
 <script setup>
 import { computed, shallowRef } from 'vue'
 import LineChart from './LineChart.vue'
+import TokenBars from './TokenBars.vue'
 import StatCard from './StatCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import AppIcon from './AppIcon.vue'
@@ -58,14 +59,12 @@ const totals = computed(() => hourly.value.reduce((acc, b) => {
 
 const freshTokens = computed(() => Math.max(0, totals.value.prompt - totals.value.cached))
 const endpoint = computed(() => state.value?.endpoint?.currentUrl || '')
-
-const segs = computed(() => {
-  const total = totals.value.prompt + totals.value.completion || 1
-  return [
-    { label: '缓存命中', value: totals.value.cached, color: 'var(--green)', share: (totals.value.cached / total) * 100 },
-    { label: '未命中输入', value: freshTokens.value, color: 'var(--blue)', share: (freshTokens.value / total) * 100 },
-    { label: '输出', value: totals.value.completion, color: 'var(--accent-2)', share: (totals.value.completion / total) * 100 },
-  ]
+const coverageText = computed(() => {
+  const oldest = logStats.value?.oldestAt
+  const newest = logStats.value?.newestAt
+  if (!oldest || !newest) return `当前 ${hours.value}h 窗口暂无日志`
+  const span = Math.max(0, (newest - oldest) / 3600000)
+  return `日志覆盖 ${span.toFixed(1)}h / 当前窗口 ${hours.value}h`
 })
 
 const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value[key] || 0)
@@ -97,6 +96,12 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
         :hint="`输入 ${compact(logStats.promptTokens24h)} + 输出 ${compact(logStats.completionTokens24h)}`"
         :title="`输入 ${exact(logStats.promptTokens24h)} + 输出 ${exact(logStats.completionTokens24h)} = ${exact(logStats.tokens24h)}`"
         tone="accent" icon="box"
+      />
+      <StatCard
+        label="累计总 Token" :value="compact(logStats.allTimeTokens || 0)"
+        :hint="`输入 ${compact(logStats.allTimePromptTokens)} + 输出 ${compact(logStats.allTimeCompletionTokens)}`"
+        :title="`保留日志累计：${exact(logStats.allTimePromptTokens)} + ${exact(logStats.allTimeCompletionTokens)} = ${exact(logStats.allTimeTokens)}`"
+        icon="box"
       />
       <StatCard label="推理 Token" :value="compact(logStats.reasoningTokens24h || 0)" hint="思考链消耗" icon="spark" />
       <StatCard
@@ -134,7 +139,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
           <b v-if="metric !== 'cache'">{{ compact(legendValue(line.key)) }}</b>
         </span>
         <span class="grow" />
-        <span class="legend-note">命中 {{ compact(totals.cached) }} / 输入 {{ compact(totals.prompt) }}</span>
+        <span class="legend-note">{{ coverageText }}</span>
       </div>
 
       <div class="chart-body">
@@ -146,27 +151,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
     </section>
 
     <section class="two-col">
-      <div class="card composition">
-        <header class="mini-head">
-          <span class="kicker">Composition</span>
-          <h3>Token 构成</h3>
-        </header>
-        <div class="stackbar">
-          <div v-for="seg in segs" :key="seg.label" class="seg-fill" :style="{ width: `${Math.max(seg.share, 0)}%`, background: seg.color }" />
-        </div>
-        <div class="compo">
-          <div v-for="seg in segs" :key="seg.label" class="compo-row">
-            <i :style="{ background: seg.color }" />
-            <span class="truncate">{{ seg.label }}</span>
-            <b>{{ compact(seg.value) }}</b>
-            <em>{{ seg.share.toFixed(1) }}%</em>
-          </div>
-        </div>
-        <p class="note">
-          <AppIcon name="spark" :size="12" />
-          缓存按前缀复用，对话越长命中越稳定。
-        </p>
-      </div>
+      <TokenBars :rows="byModel" />
 
       <div class="card models-card">
         <header class="mini-head row">

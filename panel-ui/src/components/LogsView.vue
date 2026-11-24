@@ -1,5 +1,5 @@
 <script setup>
-import { computed, shallowRef, watch } from 'vue'
+import { computed, onMounted, shallowRef, watch } from 'vue'
 import { logs, logStats, refreshAll, loadLogs, windowHours } from '../composables/useDashboard.js'
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
@@ -9,20 +9,20 @@ import { num, ms, clock, pct, compact, exact, ago } from '../composables/useForm
 const props = defineProps({ polling: { type: Boolean, default: true } })
 const emit = defineEmits(['update:polling'])
 
-const PAGE_SIZE = 50
+const pageSize = shallowRef(20)
 const page = shallowRef(1)
 const total = shallowRef(0)
 const busy = shallowRef(false)
 const expanded = shallowRef(null)
 
-const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+const pages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
 async function load() {
   busy.value = true
   try {
     // Follow the shared window so switching ranges on the overview keeps the
     // numbers consistent when coming back to this page.
-    const data = await loadLogs({ page: page.value, pageSize: PAGE_SIZE, hours: windowHours.value })
+    const data = await loadLogs({ page: page.value, pageSize: pageSize.value, hours: windowHours.value })
     total.value = data.total || 0
   } catch (error) {
     notify(error.message, 'err')
@@ -64,6 +64,8 @@ function hitRate(entry) {
 }
 
 watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.length) })
+watch(pageSize, () => { page.value = 1; expanded.value = null; load() })
+onMounted(load)
 </script>
 
 <template>
@@ -146,6 +148,13 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
       </div>
 
       <footer class="pager">
+        <label class="page-size">每页
+          <select v-model.number="pageSize" aria-label="每页条数">
+            <option :value="10">10</option><option :value="20">20</option>
+            <option :value="50">50</option><option :value="100">100</option>
+          </select>
+          条
+        </label>
         <span class="muted tiny">第 {{ page }} / {{ pages }} 页 · 共 {{ num(total) }} 条</span>
         <div class="row">
           <button class="btn btn-sm btn-icon" type="button" title="首页" :disabled="page <= 1" @click="go(1)"><AppIcon name="chevronsLeft" :size="13" /></button>
@@ -171,6 +180,11 @@ watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.l
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--dim); cursor: pointer; user-select: none; }
 .toggle input { accent-color: var(--accent); }
 .row-click { cursor: pointer; }
+.log-table td, .log-table th { padding-left: 10px; padding-right: 10px; white-space: nowrap; }
+.log-table td:nth-child(2) { max-width: 210px; overflow: hidden; text-overflow: ellipsis; }
+.log-table td:nth-child(7), .log-table td:nth-child(9) { text-align: right; }
+.page-size { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; font-size: 11px; color: var(--dim); }
+.page-size select { height: 28px; padding: 0 6px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-xs); }
 .detail-row td { background: var(--surface-2); padding: 0; }
 .detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 20px; padding: 14px 18px; }
 .detail-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
