@@ -21,6 +21,9 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # wget is used by the healthcheck; tini gives a real PID 1 so SIGTERM reaches node.
+# Pinning the apk version would break every time node:24-alpine rolls forward,
+# so it is deliberately unpinned (hadolint DL3018).
+# hadolint ignore=DL3018
 RUN apk add --no-cache tini
 
 COPY package.json ./
