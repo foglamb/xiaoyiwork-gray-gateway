@@ -221,6 +221,11 @@ export class RequestLog {
       failed24h: failed.length,
       successRate: completed.length ? Math.round((1 - failed.length / completed.length) * 1000) / 10 : null,
       averageMs: completed.length ? Math.round(sum(completed, 'ms') / completed.length) : null,
+      p50Ms: percentile(completed.map((entry) => Number(entry.ms)).filter(Number.isFinite), 0.5),
+      p95Ms: percentile(completed.map((entry) => Number(entry.ms)).filter(Number.isFinite), 0.95),
+      averageFirstByteMs: average(day.map((entry) => entry.firstByteMs).filter(Number.isFinite)),
+      averageFirstTokenMs: average(day.map((entry) => entry.ttftMs).filter(Number.isFinite)),
+      outputTps: aggregateOutputTps(day),
       tokens24h: sum(day, 'totalTokens'),
       promptTokens24h: promptTokens,
       completionTokens24h: sum(day, 'completionTokens'),
@@ -269,7 +274,7 @@ export class RequestLog {
     for (const entry of source) {
       if (entry.at < start) continue
       const model = entry.model || 'unknown'
-      const row = byModel.get(model) || { model, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, ms: 0, failed: 0 }
+      const row = byModel.get(model) || { model, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, ms: 0, generationMs: 0, failed: 0 }
       row.requests++
       row.prompt += Number(entry.promptTokens) || 0
       row.completion += Number(entry.completionTokens) || 0
@@ -277,6 +282,7 @@ export class RequestLog {
       row.reasoning += Number(entry.reasoningTokens) || 0
       row.total += Number(entry.totalTokens) || 0
       row.ms += Number(entry.ms) || 0
+      row.generationMs += timingMetrics(entry).generationMs || 0
       if (entry.status >= 400) row.failed++
       byModel.set(model, row)
       const index = Math.min(bucketCount - 1, Math.floor((entry.at - start) / width))
@@ -309,6 +315,7 @@ export class RequestLog {
       byModel: [...byModel.values()].map((row) => ({
         ...row,
         averageMs: row.requests ? Math.round(row.ms / row.requests) : null,
+        outputTps: row.completion > 0 && row.generationMs > 0 ? roundTps(row.completion / (row.generationMs / 1000)) : null,
         cacheHitRate: row.prompt ? roundRate(row.cached / row.prompt) : null,
       })).sort((a, b) => b.requests - a.requests),
       byHour: output,
@@ -337,7 +344,50 @@ function normalizeEntry(entry) {
     totalTokens: entry.totalTokens ?? null,
     cachedTokens: entry.cachedTokens ?? null,
     reasoningTokens: entry.reasoningTokens ?? null,
+    ...timingMetrics(entry),
   }
+}
+
+export function timingMetrics(entry) {
+  const totalMs = Number(entry.ms)
+  const ttft = Number(entry.ttftMs)
+  const generationMs = Number.isFinite(totalMs) && totalMs > 0
+    ? (Number.isFinite(ttft) && ttft >= 0 && totalMs >= ttft ? totalMs - ttft : totalMs)
+    : null
+  const completion = Number(entry.completionTokens)
+  const prompt = Number(entry.promptTokens)
+  return {
+    generationMs: generationMs === null ? null : Math.round(generationMs),
+    outputTps: completion > 0 && generationMs > 0 ? roundTps(completion / (generationMs / 1000)) : null,
+    prefillTps: prompt > 0 && ttft > 0 ? roundTps(prompt / (ttft / 1000)) : null,
+  }
+}
+
+function roundTps(value) {
+  return Number.isFinite(value) ? Math.round(value * 10) / 10 : null
+}
+
+function aggregateOutputTps(entries) {
+  let completion = 0
+  let generationMs = 0
+  for (const entry of entries) {
+    const timing = timingMetrics(entry)
+    if (Number(entry.completionTokens) > 0 && timing.generationMs > 0) {
+      completion += Number(entry.completionTokens)
+      generationMs += timing.generationMs
+    }
+  }
+  return generationMs > 0 ? roundTps(completion / (generationMs / 1000)) : null
+}
+
+function average(values) {
+  return values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length) : null
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  return Math.round(sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))])
 }
 
 function numberOrNull(value) {

@@ -579,11 +579,13 @@ export function createProxyServer(config, {
       let accountId = ''
       let upstreamError = null
       try {
+        let firstByteAt = 0
         let firstTokenAt = 0
         const upstreamResponse = await runtime.pool.chat(body, route, {
           signal: controller.signal,
           configPath,
           onUsage: (value) => { usage = value },
+          onFirstByte: () => { if (!firstByteAt) firstByteAt = Date.now() },
           onFirstToken: () => { if (!firstTokenAt) firstTokenAt = Date.now() },
           onError: (error) => { upstreamError = error },
         })
@@ -600,7 +602,7 @@ export function createProxyServer(config, {
           status: upstreamError ? 502 : upstreamResponse.status,
           accountId, usage, rate: 0,
           error: upstreamError?.message || undefined,
-          marks: { firstByteAt: runtime.pool.lastFirstByteAt || null, firstTokenAt: firstTokenAt || null },
+          marks: { firstByteAt: firstByteAt || null, firstTokenAt: firstTokenAt || null },
         })
       } catch (error) {
         requestLog.finish(requestId, { status: error.status || (controller.signal.aborted ? 499 : 500), error: controller.signal.aborted && !response.writableEnded ? '客户端断开' : error.message })

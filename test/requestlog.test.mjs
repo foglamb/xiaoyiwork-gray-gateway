@@ -190,3 +190,31 @@ test('72h reads records beyond 24h even after they leave the memory ring', async
   const chart = log.breakdown(72)
   assert.ok(chart.byHour[0].at <= now - 71 * 3600000, '72h chart retains its full time axis')
 })
+
+test('request metrics derive generation throughput and latency percentiles', () => {
+  const log = new RequestLog({ persist: false })
+  const at = Date.now() - 10000
+  log.begin({ id: 'throughput', model: 'm', stream: true, route: { selected: true, pool: 'gray', reason: 'test' } })
+  log.active.get('throughput').at = at
+  log.finish('throughput', {
+    status: 200,
+    accountId: 'a',
+    marks: { firstByteAt: at + 500, firstTokenAt: at + 2000 },
+    usage: {
+      prompt_tokens: 200, completion_tokens: 400, total_tokens: 600,
+      prompt_tokens_details: { cached_tokens: 50 },
+      completion_tokens_details: { reasoning_tokens: 100 },
+    },
+  })
+  const entry = log.page({ page: 1, pageSize: 20 }).entries[0]
+  assert.equal(entry.generationMs, 8000)
+  assert.equal(entry.outputTps, 50)
+  assert.equal(entry.prefillTps, 100)
+  const stats = log.stats(24)
+  assert.equal(stats.outputTps, 50)
+  assert.equal(stats.averageFirstByteMs, 500)
+  assert.equal(stats.averageFirstTokenMs, 2000)
+  assert.equal(stats.p50Ms, 10000)
+  assert.equal(stats.p95Ms, 10000)
+  assert.equal(log.breakdown(24).byModel[0].outputTps, 50)
+})

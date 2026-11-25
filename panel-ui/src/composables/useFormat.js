@@ -58,3 +58,11 @@ export function ago(value) {
   if (diff < 86400000) return `${Math.round(diff / 3600000)} 小时前`
   return `${Math.round(diff / 86400000)} 天前`
 }
+
+/** Generation throughput; null means the request lacks enough timing data. */
+export function tps(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
+  const n = Number(value)
+  if (n >= 1000) return `${compact(n)} tok/s`
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} tok/s`
+}

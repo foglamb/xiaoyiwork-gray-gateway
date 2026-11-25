@@ -210,7 +210,7 @@ export class AccountPool {
    * - 5xx / network: cool briefly, try the next one.
    * The client sees one request; it never learns an account was swapped.
    */
-  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken, onError } = {}) {
+  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken, onFirstByte, onError } = {}) {
     this.configPath = configPath
     const outgoing = normalizeRequestBody({ ...structuredClone(body), stream: true }, {
       kimi: this.config.kimiCompatibility !== false,
@@ -261,6 +261,7 @@ export class AccountPool {
       if (response.ok && response.body) {
         this.clearCool(account)
         this.lastFirstByteAt = Date.now()
+        onFirstByte?.(this.lastFirstByteAt)
         this.stats.failovers = (this.stats.failovers || 0) + (attempt > 0 ? 1 : 0)
         return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage, onFirstToken, onError })
       }
