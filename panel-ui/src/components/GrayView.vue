@@ -1,7 +1,8 @@
 <script setup>
 import { computed, ref, shallowRef, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
-import { state, models } from '../composables/useDashboard.js'
+import { mergeConfirmed } from '../lib/panel.js'
+import { state, models, acceptGraySnapshot } from '../composables/useDashboard.js'
 import { saveGray, previewBucket } from '../composables/useGray.js'
 import { notify } from '../composables/useToast.js'
 import { num, pct } from '../composables/useFormat.js'
@@ -22,11 +23,12 @@ const selectedModels = ref([])
 const saving = shallowRef(false)
 const previewInput = ref('')
 const preview = shallowRef(null)
+const previewBusy = shallowRef(false)
 
 const serverGray = computed(() => state.value?.gray || {})
 
-function syncFromServer() {
-  const g = serverGray.value
+function syncFromServer(source = state.value) {
+  const g = source?.gray || {}
   enabled.value = Boolean(g.enabled)
   percentage.value = Number(g.percentage) || 0
   pool.value = g.pool || 'gray'
@@ -34,47 +36,40 @@ function syncFromServer() {
   headerOverride.value = Boolean(g.allowHeaderOverride)
   cookieOverride.value = Boolean(g.allowCookieOverride)
   shadow.value = Boolean(g.shadow)
-  allowGrayModels.value = Boolean(state.value?.allowGrayModels)
+  allowGrayModels.value = Boolean(source?.allowGrayModels)
   allowlistText.value = (g.allowlist || []).join('\n')
   denylistText.value = (g.denylist || []).join('\n')
   selectedModels.value = [...(g.models || [])]
 }
 
-watch(serverGray, syncFromServer, { immediate: true, deep: true })
+
 
 const lines = (text) => text.split('\n').map((s) => s.trim()).filter(Boolean)
 
-const dirty = computed(() => {
-  const g = serverGray.value
-  return enabled.value !== Boolean(g.enabled)
-    || percentage.value !== (Number(g.percentage) || 0)
-    || pool.value !== (g.pool || 'gray')
-    || salt.value !== (g.salt || '')
-    || headerOverride.value !== Boolean(g.allowHeaderOverride)
-    || cookieOverride.value !== Boolean(g.allowCookieOverride)
-    || shadow.value !== Boolean(g.shadow)
-    || allowGrayModels.value !== Boolean(state.value?.allowGrayModels)
-    || lines(allowlistText.value).join(',') !== (g.allowlist || []).join(',')
-    || lines(denylistText.value).join(',') !== (g.denylist || []).join(',')
-    || selectedModels.value.slice().sort().join(',') !== (g.models || []).slice().sort().join(',')
+const readDraft = () => ({
+  enabled: enabled.value, percentage: Number(percentage.value), pool: pool.value, salt: salt.value,
+  allowHeaderOverride: headerOverride.value, allowCookieOverride: cookieOverride.value,
+  shadow: shadow.value, allowGrayModels: allowGrayModels.value,
+  allowlist: lines(allowlistText.value), denylist: lines(denylistText.value), models: [...selectedModels.value],
 })
+const baseline = shallowRef(null)
+const dirty = computed(() => baseline.value !== null && Object.keys(readDraft()).some((key) => JSON.stringify(readDraft()[key]) !== JSON.stringify(baseline.value[key])))
+watch(() => state.value, (value) => {
+  if (!value?.gray || dirty.value || saving.value) return
+  syncFromServer(value)
+  baseline.value = readDraft()
+}, { immediate: true })
 
 async function save() {
   saving.value = true
   try {
-    await saveGray({
-      enabled: enabled.value,
-      percentage: Number(percentage.value),
-      pool: pool.value,
-      salt: salt.value,
-      allowHeaderOverride: headerOverride.value,
-      allowCookieOverride: cookieOverride.value,
-      shadow: shadow.value,
-      allowGrayModels: allowGrayModels.value,
-      allowlist: lines(allowlistText.value),
-      denylist: lines(denylistText.value),
-      models: selectedModels.value,
-    })
+    const submitted = readDraft()
+    const response = await saveGray(submitted)
+    const confirmed = { ...response.gray, allowGrayModels: response.allowGrayModels }
+    const merged = mergeConfirmed(readDraft(), submitted, confirmed)
+    syncFromServer({ gray: merged, allowGrayModels: merged.allowGrayModels })
+    baseline.value = confirmed
+    acceptGraySnapshot(confirmed)
     notify('灰度配置已热更新', 'ok')
     emit('saved')
   } catch (error) {
@@ -84,20 +79,32 @@ async function save() {
   }
 }
 
-function revert() { syncFromServer() }
+function revert() { if (baseline.value) syncFromServer({ gray: baseline.value, allowGrayModels: baseline.value.allowGrayModels }) }
 
 const PRESETS = [0, 1, 5, 10, 25, 50, 100]
 
 function bucketPct(bucket) { return (bucket / 10000) * 100 }
 
 async function runPreview() {
+  if (previewBusy.value) return
   const identity = previewInput.value.trim() || 'anonymous'
-  preview.value = await previewBucket(identity, salt.value, percentage.value)
+  const submittedSalt = salt.value
+  const submittedPercentage = percentage.value
+  previewBusy.value = true
+  preview.value = null
+  try {
+    const result = await previewBucket(identity, submittedSalt, submittedPercentage)
+    if (identity === (previewInput.value.trim() || 'anonymous') && submittedSalt === salt.value && submittedPercentage === percentage.value) preview.value = result
+  } catch (error) {
+    notify(error.message || '分流预览失败，请重试', 'err')
+  } finally {
+    previewBusy.value = false
+  }
 }
 
-watch([salt, percentage], () => { preview.value = null })
+watch([salt, percentage, previewInput], () => { preview.value = null })
 
-const grayModelList = computed(() => models.value.filter((m) => m.gray))
+const grayModelList = computed(() => models.value.filter((m) => m.gatewayGray))
 
 const distTotal = computed(() => {
   const s = state.value?.stats
@@ -173,7 +180,7 @@ const distTotal = computed(() => {
           <p class="muted tiny mb">用与服务端一致的 SHA256 分桶算法演算，验证某个客户端会落到哪一侧。</p>
           <div class="row">
             <input v-model="previewInput" class="input mono-input" placeholder="token:xy_xxx 或 user-42" spellcheck="false" @keyup.enter="runPreview" />
-            <button class="btn btn-sm" type="button" @click="runPreview">演算</button>
+            <button class="btn btn-sm" type="button" :disabled="previewBusy" @click="runPreview">{{ previewBusy ? '演算中…' : '演算' }}</button>
           </div>
           <div v-if="preview" class="result" :class="{ gray: preview.gray }">
             <div class="result-main">

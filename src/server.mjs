@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { AccountPool } from './pool.mjs'
 import { ModelCatalog } from './models.mjs'
-import { GRAY_MODELS, HttpError, apiAuthorized, publicConfig, routeGray, validateConfig } from './canary.mjs'
+import { HttpError, apiAuthorized, publicConfig, routeGray, validateConfig, bucketFor } from './canary.mjs'
 import { RequestLog } from './requestlog.mjs'
 import { isLoopbackAddress, lanUrls, panelAuthorized } from './network.mjs'
 import { OAuthManager, OAUTH } from './oauth.mjs'
@@ -76,8 +76,12 @@ export function createProxyServer(config, {
   const modelCatalog = new ModelCatalog({ fetchImpl, logger, configPath })
   const observedModels = new Set(requestLog.modelIds())
   const modelList = () => modelCatalog.list(runtime.config, [...observedModels])
-  const catalogAccount = () => runtime.config.accounts.gray[0] || runtime.config.accounts.stable[0] || null
-  modelCatalog.refresh({ account: catalogAccount() }).catch(() => {})
+  const refreshModels = (force = false) => modelCatalog.refresh({ force,
+    accounts: [...runtime.config.accounts.gray, ...runtime.config.accounts.stable]
+      .sort((a, b) => Number(runtime.pool.isCooling(a)) - Number(runtime.pool.isCooling(b))),
+    renewAccount: (account) => runtime.pool.renew(account),
+  })
+  refreshModels().catch(() => {})
   const quotaCache = new Map()
   const quotaInflight = new Map()
   const quotaError = new Map()
@@ -150,7 +154,7 @@ export function createProxyServer(config, {
     const minutes = Number(runtime.config.modelCatalogMinutes ?? 15)
     if (!(minutes > 0)) return
     modelCatalogTimer = setInterval(() => {
-      modelCatalog.refresh({ force: true, account: catalogAccount() }).catch(() => {})
+      refreshModels(true).catch(() => {})
     }, Math.max(60000, minutes * 60000))
     modelCatalogTimer.unref?.()
   }
@@ -291,6 +295,27 @@ export function createProxyServer(config, {
     }
     if (!apiAuthorized(request, runtime.config, admin)) {
       sendJson(response, 401, errorBody(new HttpError(401, admin ? '需要 Bearer ADMIN_KEY 或 x-admin-key' : '需要 Bearer API_KEY', 'authentication_error'), requestId), { 'www-authenticate': 'Bearer' })
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/gray/preview') {
+      const input = await readJsonBody(request, 16384)
+      if (typeof input.identity !== 'string' || !input.identity.trim() || input.identity.length > 4096) {
+        throw new HttpError(400, 'identity 必须是 1..4096 字符的字符串', 'invalid_preview_input')
+      }
+      if (typeof input.salt !== 'string' || !input.salt || input.salt.length > 4096) {
+        throw new HttpError(400, 'salt 必须是 1..4096 字符的字符串', 'invalid_preview_input')
+      }
+      if (typeof input.percentage !== 'number' || !Number.isFinite(input.percentage) || input.percentage < 0 || input.percentage > 100) {
+        throw new HttpError(400, 'percentage 必须是 0..100 的数字', 'invalid_preview_input')
+      }
+      const bucket = bucketFor(input.identity, input.salt)
+      sendJson(response, 200, {
+        identity: input.identity,
+        salt: input.salt,
+        bucket,
+        gray: bucket < Math.round(input.percentage * 100),
+      })
       return
     }
 
@@ -551,24 +576,25 @@ export function createProxyServer(config, {
     }
     if (request.method === 'POST' && url.pathname === '/api/models/session') {
       const input = await readJsonBody(request, 65536)
-      await modelCatalog.importSession(input)
-      const status = await modelCatalog.refresh({ force: true, account: catalogAccount() })
+      const status = await modelCatalog.importSession(input, {
+        accounts: [...runtime.config.accounts.gray, ...runtime.config.accounts.stable],
+        renewAccount: (account) => runtime.pool.renew(account),
+      })
       sendJson(response, 200, { ok: status.ok, status, models: modelList() })
       return
     }
     if (request.method === 'DELETE' && url.pathname === '/api/models/session') {
-      const status = modelCatalog.clearSession()
+      const status = await modelCatalog.clearSession()
       sendJson(response, 200, { ok: true, status, models: modelList() })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/models/refresh') {
-      const status = await modelCatalog.refresh({ force: true, account: catalogAccount() })
+      const status = await refreshModels(true)
       sendJson(response, 200, { ok: status.ok, status, models: modelList() })
       return
     }
     if (request.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
-      const enabled = new Set([...GRAY_MODELS, ...(runtime.config.grayModels || []), ...(runtime.config.gray.models || [])])
-      const data = modelList().filter((model) => runtime.config.allowGrayModels || !enabled.has(model.id)).map((model) => ({
+      const data = modelList().filter((model) => model.gatewayAllowed).map((model) => ({
         id: model.id, object: 'model', created: 0, owned_by: 'xiaoyiwork', display_name: model.name,
       }))
       sendJson(response, 200, { object: 'list', data })

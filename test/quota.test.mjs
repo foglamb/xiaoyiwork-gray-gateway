@@ -46,7 +46,7 @@ test('panel auto-loads quota and shows account points', async (t) => {
   const upstream = await upstreamServer()
   const config = fixture()
   config.upstreamUrl = `http://127.0.0.1:${upstream.port}/celia/v1/sse-api/chat/completions`
-  const proxy = createProxyServer(config, { persistConfig: async () => {} })
+  const proxy = createProxyServer(config, { persistConfig: async () => {}, fetchImpl: (url, init) => new URL(url).hostname === '127.0.0.1' ? fetch(url, init) : Promise.resolve(new Response('', { status: 503 })) })
   proxy.listen(0, '127.0.0.1')
   await once(proxy, 'listening')
   t.after(async () => { proxy.closeAllConnections?.(); await new Promise((r) => proxy.close(r)); upstream.server.closeAllConnections?.(); await new Promise((r) => upstream.server.close(r)) })
@@ -69,7 +69,7 @@ test('per-request model points are recorded and exposed', async (t) => {
   const upstream = await upstreamServer()
   const config = fixture()
   config.upstreamUrl = `http://127.0.0.1:${upstream.port}/celia/v1/sse-api/chat/completions`
-  const proxy = createProxyServer(config, { persistConfig: async () => {} })
+  const proxy = createProxyServer(config, { persistConfig: async () => {}, fetchImpl: (url, init) => new URL(url).hostname === '127.0.0.1' ? fetch(url, init) : Promise.resolve(new Response('', { status: 503 })) })
   proxy.listen(0, '127.0.0.1')
   await once(proxy, 'listening')
   t.after(async () => { proxy.closeAllConnections?.(); await new Promise((r) => proxy.close(r)); upstream.server.closeAllConnections?.(); await new Promise((r) => upstream.server.close(r)) })

@@ -1,6 +1,7 @@
 import { chmodSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { authHeaders } from './upstream.mjs'
+import { modelPolicy, HttpError } from './canary.mjs'
 
 const WORK_MODELS_URL = 'https://xiaoyi.huawei.com/celia/service/work/getWorkModelList'
 const CHAT_URL = 'https://xiaoyi.huawei.com/chat/'
@@ -35,9 +36,9 @@ function cookieString(input) {
 }
 
 /**
- * Upstream model discovery uses a separate Xiaoyi web session. That cookie is
- * never mixed into chat credentials, API responses, or logs. The local session
- * file also caches the last genuine catalogue so restarts do not erase it.
+ * HAG discovery reuses gateway accounts; a web session is an optional fallback.
+ * Credentials stay out of public status and catalogue metadata. Cache timestamps
+ * describe successful fetches, not failed refresh attempts.
  */
 export class ModelCatalog {
   constructor({ fetchImpl = fetch, logger = console, configPath = null } = {}) {
@@ -47,8 +48,9 @@ export class ModelCatalog {
     this.cookie = ''
     this.updatedAt = null
     this.upstream = []
-    this.status = { ok: null, source: 'pending', message: '尚未刷新', refreshedAt: null }
+    this.status = { ok: null, source: 'pending', message: '尚未刷新', refreshedAt: null, lastSuccessAt: null, lastAttemptAt: null, transport: null }
     this.inflight = null
+    this.sessionChain = Promise.resolve()
     this.#load()
   }
 
@@ -58,13 +60,16 @@ export class ModelCatalog {
       const saved = JSON.parse(readFileSync(this.sessionPath, 'utf8'))
       this.cookie = cookieString(saved.cookie)
       this.updatedAt = saved.updatedAt || null
-      if (Array.isArray(saved.models)) this.upstream = saved.models.filter((row) => row?.id)
+      if (Array.isArray(saved.models)) this.upstream = saved.models.filter((row) => typeof row?.id === 'string' && row.id)
       if (this.upstream.length) {
         this.status = {
           ok: true,
           source: 'upstream-cache',
           message: `已载入 ${this.upstream.length} 个上游缓存模型`,
-          refreshedAt: saved.refreshedAt || this.updatedAt,
+          refreshedAt: saved.lastSuccessAt || saved.refreshedAt || null,
+          lastSuccessAt: saved.lastSuccessAt || saved.refreshedAt || null,
+          lastAttemptAt: saved.lastAttemptAt || null,
+          transport: ['hag', 'web'].includes(saved.transport) ? saved.transport : null,
         }
       }
     } catch { /* absent or invalid private session starts empty */ }
@@ -74,10 +79,13 @@ export class ModelCatalog {
     if (!this.sessionPath) return
     const temporary = `${this.sessionPath}.${process.pid}.tmp`
     writeFileSync(temporary, `${JSON.stringify({
-      version: 1,
+      version: 2,
       cookie: this.cookie,
       updatedAt: this.updatedAt,
-      refreshedAt: this.status.refreshedAt,
+      refreshedAt: this.status.lastSuccessAt,
+      lastSuccessAt: this.status.lastSuccessAt,
+      lastAttemptAt: this.status.lastAttemptAt,
+      transport: this.status.transport,
       models: this.upstream,
     }, null, 2)}\n`, { mode: 0o600 })
     renameSync(temporary, this.sessionPath)
@@ -88,84 +96,109 @@ export class ModelCatalog {
   publicStatus() {
     return {
       ...this.status,
+      stale: this.status.source === 'upstream-cache' || this.status.ok !== true || !this.status.lastSuccessAt || Date.now() - Date.parse(this.status.lastSuccessAt) >= 900000,
       sessionConfigured: Boolean(this.cookie),
       sessionUpdatedAt: this.updatedAt,
     }
   }
 
-  async importSession(input) {
+  importSession(input, refreshOptions = {}) {
     const cookie = cookieString(input?.cookies ?? input?.cookie ?? input)
-    if (!cookie) throw new Error('Cookie 为空或格式不正确')
-    this.cookie = cookie
-    this.updatedAt = new Date().toISOString()
-    this.#save()
-    return this.refresh({ force: true })
+    if (!cookie) throw new HttpError(400, 'Cookie 为空或格式不正确', 'invalid_catalog_session')
+    // Serialize the entire import, including discovery. Waiting only for the
+    // initial refresh lets an older web fallback overwrite a newer Cookie.
+    const operation = this.sessionChain.then(async () => {
+      if (this.inflight) await this.inflight
+      this.cookie = cookie
+      this.updatedAt = new Date().toISOString()
+      this.#save()
+      return this.refresh({ ...refreshOptions, force: true })
+    })
+    this.sessionChain = operation.catch(() => {})
+    return operation
   }
 
   clearSession() {
-    this.cookie = ''
-    this.updatedAt = null
-    this.status = this.upstream.length
-      ? { ok: true, source: 'upstream-cache', message: `目录会话已清除，保留 ${this.upstream.length} 个上游缓存模型`, refreshedAt: this.status.refreshedAt }
-      : { ok: null, source: 'observed-config', message: '目录会话已清除，等待重新授权', refreshedAt: null }
-    this.#save()
-    return this.publicStatus()
+    const operation = this.sessionChain.then(async () => {
+      if (this.inflight) await this.inflight
+      this.cookie = ''
+      this.updatedAt = null
+      // Clearing the optional web session has no bearing on a healthy HAG cache.
+      if (this.status.transport !== 'hag') {
+        this.status = { ...this.status, ok: null,
+          source: this.upstream.length ? 'upstream-cache' : 'observed-config',
+          message: this.upstream.length ? `网页备用会话已清除，保留 ${this.upstream.length} 个上游缓存模型` : '网页备用会话已清除',
+        }
+      }
+      this.#save()
+      return this.publicStatus()
+    })
+    this.sessionChain = operation.catch(() => {})
+    return operation
   }
 
   list(config, observed = []) {
     const rows = new Map()
-    const add = (id, name, source, extra = {}) => {
-      if (!id || typeof id !== 'string') return
-      const previous = rows.get(id)
-      rows.set(id, {
-        id,
-        name: name || previous?.name || id,
-        source: previous?.source === 'upstream' ? 'upstream' : source,
-        ...previous,
-        ...extra,
-      })
+    const source = this.status.source === 'upstream-cache' ? 'upstream-cache' : 'upstream'
+    for (const model of this.upstream) {
+      if (typeof model.id !== 'string' || !model.id) continue
+      rows.set(model.id, { ...model, source, upstreamGray: typeof model.gray === 'boolean' ? model.gray : null })
     }
-    for (const model of this.upstream) add(model.id, model.name, this.status.source === 'upstream-cache' ? 'upstream-cache' : 'upstream', model)
-    for (const id of observed) add(id, id, 'observed')
-    for (const id of [...(config.grayModels || []), ...(config.gray?.models || [])]) add(id, id, 'config')
-    return [...rows.values()].map((model) => ({
-      ...model,
-      gray: model.gray === true || (config.grayModels || []).includes(model.id) || (config.gray?.models || []).includes(model.id),
-      rate: 0,
-    })).sort((a, b) => a.id.localeCompare(b.id))
+    for (const [ids, origin] of [[observed, 'observed'], [[...(config.grayModels || []), ...(config.gray?.models || [])], 'config']]) {
+      for (const id of ids) {
+        if (typeof id === 'string' && id && !rows.has(id)) rows.set(id, { id, name: id, source: origin, upstreamGray: null })
+      }
+    }
+    return [...rows.values()].map((model) => {
+      const policy = modelPolicy(config, model.id)
+      return { ...model, ...policy, gray: model.upstreamGray === true || policy.gatewayGray, rate: 0 }
+    }).sort((a, b) => a.id.localeCompare(b.id))
   }
 
-  async refresh({ force = false, account = null } = {}) {
+  async refresh({ force = false, account = null, accounts = account ? [account] : [], renewAccount = null } = {}) {
     if (this.inflight) return this.inflight
-    if (!force && this.status.ok && this.status.refreshedAt && Date.now() - Date.parse(this.status.refreshedAt) < 900000) {
-      return this.publicStatus()
-    }
-    this.inflight = this.#discover(account).finally(() => { this.inflight = null })
+    if (!force && this.status.ok && this.status.lastSuccessAt && Date.now() - Date.parse(this.status.lastSuccessAt) < 900000) return this.publicStatus()
+    this.inflight = this.#discover(accounts, renewAccount).finally(() => { this.inflight = null })
     return this.inflight
   }
 
-  async #discover(account) {
-    try {
-      let models
+  async #discover(accounts, renewAccount) {
+    const errors = []
+    let models = null, transport = null
+    const seen = new Set()
+    for (const original of accounts) {
+      if (!original?.credential || !original.uid || !original.deviceId || seen.has(original.uid)) continue
+      seen.add(original.uid)
       try {
-        if (!account) throw new Error('没有可用于 HAG 目录的账号')
-        models = await this.#hagModels(account)
-      } catch (hagError) {
-        try { models = await this.#workModels() }
-        catch (webError) { throw new Error(`${hagError.message}；网页备用目录：${webError.message}`) }
+        try { models = await this.#hagModels(original) }
+        catch (error) {
+          if (![401, 403].includes(error.status) || !original.refreshToken || !renewAccount) throw error
+          const renewed = await renewAccount(original)
+          models = await this.#hagModels(renewed || original)
+        }
+        transport = 'hag'
+        break
+      } catch (error) {
+        errors.push(error instanceof CatalogError ? error : new CatalogError('HAG 模型目录连接或续期失败', 502, 'catalog_unavailable'))
       }
-      if (!models.length) throw new Error('上游返回了空模型目录')
+    }
+    if (!models && (this.cookie || !accounts.length)) {
+      try { models = await this.#workModels(); transport = 'web' }
+      catch (error) { errors.push(error instanceof CatalogError ? error : new CatalogError('网页备用目录请求失败', 502, 'catalog_unavailable')) }
+    }
+    const attemptedAt = new Date().toISOString()
+    if (models?.length) {
       this.upstream = models
-      this.status = { ok: true, source: 'upstream', message: `已从上游获取 ${models.length} 个模型`, refreshedAt: new Date().toISOString() }
-      this.#save()
-    } catch (error) {
-      const featureDisabled = error.message.includes('未开放')
-      const sessionHint = featureDisabled ? '' : (this.cookie ? '网页目录会话可能已过期，请重新授权' : '尚未配置网页版目录会话')
-      this.status = {
-        ok: false,
-        source: this.upstream.length ? 'upstream-cache' : 'observed-config',
-        message: `上游目录暂不可用：${error.message}${sessionHint ? `；${sessionHint}` : ''}`,
-        refreshedAt: new Date().toISOString(),
+      this.status = { ok: true, source: 'upstream', message: `已从${transport === 'hag' ? 'HAG ' : '网页备用'}上游获取 ${models.length} 个模型`,
+        refreshedAt: attemptedAt, lastSuccessAt: attemptedAt, lastAttemptAt: attemptedAt, transport, errorType: '' }
+      try { this.#save() } catch {
+        this.status = { ...this.status, message: this.status.message + '；本地缓存保存失败', cacheWriteFailed: true }
+      }
+    } else {
+      const failure = errors.at(-1) || new CatalogError('没有可用目录账号', 503, 'catalog_account_unavailable')
+      this.status = { ...this.status, ok: false, source: this.upstream.length ? 'upstream-cache' : 'observed-config',
+        message: `目录刷新失败：${failure.message}${this.upstream.length ? '；保留上次成功目录' : ''}`,
+        lastAttemptAt: attemptedAt, errorType: failure.code,
       }
     }
     return this.publicStatus()
@@ -191,10 +224,11 @@ export class ModelCatalog {
       }),
       signal: AbortSignal.timeout(15000),
     })
-    if (!response.ok) throw new Error(`HAG 模型目录 HTTP ${response.status}`)
+    if (!response.ok) throw new CatalogError(`HAG 模型目录 HTTP ${response.status}`, response.status, 'catalog_http_error')
     const payload = await response.json()
-    const list = (payload.contents || []).flatMap((content) => content.modelList || [])
-    return list.map((row) => ({
+    if (!Array.isArray(payload?.contents)) throw new CatalogError('HAG 模型目录响应无有效列表', 502, 'catalog_invalid_response')
+    const list = payload.contents.flatMap((content) => Array.isArray(content?.modelList) ? content.modelList : [])
+    const models = list.filter((row) => row && typeof row.modelValue === 'string').map((row) => ({
       id: String(row.modelValue || '').trim(),
       name: String(row.modelName || row.modelValue || '').trim(),
       description: String(row.modelDescription || '').trim(),
@@ -202,6 +236,8 @@ export class ModelCatalog {
       upstreamRate: row.aiPointConsumptionRatio || '',
       vision: row.vision ?? row.supportVision ?? null,
     })).filter((row) => row.id)
+    if (!models.length) throw new CatalogError('HAG 上游返回空模型目录', 502, 'catalog_empty')
+    return [...new Map(models.map((m) => [m.id, m])).values()]
   }
 
   async #workModels() {
@@ -210,7 +246,7 @@ export class ModelCatalog {
       headers: jar.size ? { cookie: [...jar].map(([name, value]) => `${name}=${value}`).join('; ') } : {},
       signal: AbortSignal.timeout(12000),
     })
-    if (!page.ok) throw new Error(`模型会话初始化 HTTP ${page.status}`)
+    if (!page.ok) throw new CatalogError(`网页备用会话 HTTP ${page.status}`, page.status, 'catalog_http_error')
     const html = await page.text()
     // The Work catalogue is gated by the upstream web-agent configuration.
     // With the feature disabled, /chat/work redirects home and the internal
@@ -221,7 +257,7 @@ export class ModelCatalog {
         const config = JSON.parse(common[1])?.config || {}
         const work = (config.webAgents || []).find((agent) => agent.type === 'claw')
         if (work && (work.enableAgent === false || work.enableFeature === false)) {
-          throw new Error('当前网页配置未开放小艺Work Web（enableAgent=false）')
+          throw new CatalogError('当前网页配置未开放小艺Work Web（enableAgent=false）', 404, 'catalog_feature_disabled')
         }
       } catch (error) {
         if (error.message.includes('未开放')) throw error
@@ -229,7 +265,7 @@ export class ModelCatalog {
     }
     for (const [name, value] of cookiePairs(page.headers.getSetCookie?.() || [])) jar.set(name, value)
     const csrf = jar.get('xy_csrf_token')
-    if (!csrf) throw new Error('上游未返回 CSRF 会话')
+    if (!csrf) throw new CatalogError('网页备用目录未返回 CSRF 会话', 401, 'catalog_session_required')
     const cookie = [...jar].map(([name, value]) => `${name}=${value}`).join('; ')
     const response = await this.fetch(WORK_MODELS_URL, {
       method: 'POST',
@@ -244,20 +280,26 @@ export class ModelCatalog {
       signal: AbortSignal.timeout(12000),
     })
     for (const [name, value] of cookiePairs(response.headers.getSetCookie?.() || [])) jar.set(name, value)
-    if (!response.ok) throw new Error(`模型目录 HTTP ${response.status}`)
+    if (!response.ok) throw new CatalogError(`网页备用目录 HTTP ${response.status}`, response.status, 'catalog_http_error')
     this.cookie = [...jar].map(([name, value]) => `${name}=${value}`).join('; ')
     const payload = await response.json()
     let operation = payload.operationResult
     if (typeof operation === 'string') {
-      try { operation = JSON.parse(operation) } catch { throw new Error('模型目录 operationResult 无法解析') }
+      try { operation = JSON.parse(operation) } catch { throw new CatalogError('模型目录响应无法解析', 502, 'catalog_invalid_response') }
     }
     const list = operation?.contents?.[0]?.modelList || payload?.data || []
-    if (!Array.isArray(list)) throw new Error('模型目录结构不符合预期')
-    return list.map((row) => ({
+    if (!Array.isArray(list)) throw new CatalogError('模型目录结构不符合预期', 502, 'catalog_invalid_response')
+    const models = list.filter((row) => row && typeof row === 'object').map((row) => ({
       id: row.modelValue || row.id || row.model || row.modelName,
       name: row.modelName || row.display_name || row.name || row.modelValue || row.id,
       description: row.aiPointConsumptionRatio || row.description || '',
       vision: row.vision ?? row.supportVision ?? null,
-    })).filter((row) => row.id)
+    })).filter((row) => typeof row.id === 'string' && row.id)
+    if (!models.length) throw new CatalogError('网页备用目录返回空列表', 502, 'catalog_empty')
+    return [...new Map(models.map((m) => [m.id, m])).values()]
   }
+}
+
+class CatalogError extends Error {
+  constructor(message, status, code) { super(message); this.status = status; this.code = code }
 }

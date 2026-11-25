@@ -44,7 +44,7 @@ const METRICS = {
 const points = computed(() => hourly.value.map((b) => ({
   ...b,
   fresh: Math.max(0, (b.prompt || 0) - (b.cached || 0)),
-  cacheRate: b.prompt ? (b.cached / b.prompt) * 100 : 0,
+  cacheRate: b.cacheHitRate ?? null,
 })))
 
 const activeSeries = computed(() => METRICS[metric.value])
@@ -91,7 +91,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
 
     <section class="stats">
       <StatCard :label="`近 ${hours} 小时请求`" :value="num(logStats.last24h || 0)" :hint="`成功率 ${pct(logStats.successRate)}`" icon="pulse" />
-      <StatCard label="缓存命中率" :value="pct(logStats.cacheHitRate)" hint="命中 / 输入 Token" tone="ok" icon="spark" />
+      <StatCard label="缓存命中率" :value="pct(logStats.cacheHitRate)" :hint="`完整样本 ${num(logStats.cacheHitSamples)} · ${num(logStats.cacheHitCachedTokens)} / ${num(logStats.cacheHitPromptTokens)}`" tone="ok" icon="spark" />
       <StatCard
         label="总 Token" :value="compact(logStats.tokens24h || 0)"
         :hint="`输入 ${compact(logStats.promptTokens24h)} + 输出 ${compact(logStats.completionTokens24h)}`"

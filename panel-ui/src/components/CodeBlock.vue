@@ -1,5 +1,6 @@
 <script setup>
 import { shallowRef } from 'vue'
+import { copyText } from '../lib/clipboard.js'
 import AppIcon from './AppIcon.vue'
 import { notify } from '../composables/useToast.js'
 
@@ -11,16 +12,8 @@ const props = defineProps({
 const copied = shallowRef(false)
 
 async function copy() {
-  try { await navigator.clipboard.writeText(props.code) } catch {
-    const area = document.createElement('textarea')
-    area.value = props.code
-    area.style.position = 'fixed'
-    area.style.opacity = '0'
-    document.body.append(area)
-    area.select()
-    document.execCommand('copy')
-    area.remove()
-  }
+  try { await copyText(props.code) }
+  catch (error) { notify(error.message, 'err'); return }
   copied.value = true
   notify('已复制', 'ok', 1500)
   setTimeout(() => (copied.value = false), 1500)

@@ -271,14 +271,12 @@ function summarize(source, retained, windowHours, until) {
     total: source.length, last24h: source.length, failed24h: failed.length,
     successRate: completed.length ? Math.round((1 - failed.length / completed.length) * 1000) / 10 : null,
     averageMs: average(durations), p50Ms: percentile(durations, 0.5), p95Ms: percentile(durations, 0.95),
-    averageResponseHeadersMs: average(source.map((entry) => entry.responseHeadersMs).filter(Number.isFinite)),
-    averageFirstByteMs: average(source.map((entry) => entry.firstByteMs).filter(Number.isFinite)),
-    averageFirstTokenMs: average(source.filter((entry) => entry.hasTtft).map((entry) => entry.ttftMs)),
+    ...latencySummary(source),
     ...speedSummary(source), latencySamples: durations.length,
     tokens24h: sum(source, 'totalTokens'), promptTokens24h: promptTokens,
     completionTokens24h: sum(source, 'completionTokens'), cachedTokens24h: cachedTokens,
     reasoningTokens24h: sum(source, 'reasoningTokens'),
-    cacheHitRate: promptTokens > 0 ? roundRate(cachedTokens / promptTokens) : null,
+    ...cacheSummary(source),
     windowHours, until, retainedLog,
     // Compatibility names refer only to retained files, never permanent lifetime counters.
     oldestAt: retainedLog.oldestAt, newestAt: retainedLog.newestAt,
@@ -297,6 +295,7 @@ function buildBreakdown(source, hours, now, bucketMs) {
   const start = now - span
   const byHour = Array.from({ length: count }, (_, index) => ({
     at: start + index * width, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, failed: 0,
+    cacheHitSamples: 0, cacheHitPromptTokens: 0, cacheHitCachedTokens: 0, cacheHitRate: null,
   }))
   const models = new Map()
   for (const entry of source) {
@@ -308,7 +307,9 @@ function buildBreakdown(source, hours, now, bucketMs) {
     bucket.requests++
     for (const [target, field] of [['prompt', 'promptTokens'], ['completion', 'completionTokens'], ['cached', 'cachedTokens'], ['reasoning', 'reasoningTokens'], ['total', 'totalTokens']]) bucket[target] += numberOrNull(entry[field]) || 0
     if (entry.status >= 400) bucket.failed++
+    addCacheSample(bucket, entry)
   }
+  for (const bucket of byHour) bucket.cacheHitRate = cacheRate(bucket)
   let output = byHour
   if (explicit > 0 || hours <= 24) {
     const filled = byHour.map((bucket, index) => bucket.requests ? index : -1).filter((index) => index >= 0)
@@ -327,7 +328,7 @@ function buildBreakdown(source, hours, now, bucketMs) {
         ms: sum(entries, 'ms'), generationMs: sum(entries.filter((entry) => entry.outputTps !== null), 'generationMs'),
         failed: entries.filter((entry) => entry.status >= 400).length,
         averageMs: metrics.averageMs, p50Ms: metrics.p50Ms, p95Ms: metrics.p95Ms, latencySamples: metrics.latencySamples,
-        ...speedSummary(entries), cacheHitRate: metrics.cacheHitRate,
+        ...speedSummary(entries), ...latencySummary(entries), ...cacheSummary(entries),
       }
     }).sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model)),
     byHour: output,
@@ -340,9 +341,10 @@ function normalizeEntry(entry) {
   const firstToken = validDuration(entry.ttftMs, total) ?? validDuration(entry.firstTokenMs, total)
   return {
     ...entry, at: numberOrNull(entry.at), ms: total,
-    ...Object.fromEntries(['promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens', 'responseHeadersMs', 'firstByteMs', 'firstTokenMs'].map((key) => [key, numberOrNull(entry[key])])),
+    ...Object.fromEntries(['promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens'].map((key) => [key, numberOrNull(entry[key])])),
+    ...Object.fromEntries(['responseHeadersMs', 'firstByteMs', 'firstTokenMs'].map((key) => [key, validDuration(entry[key], total)])),
     ttftMs: firstToken, timingVersion: entry.timingVersion ?? 1,
-    firstByteMeaning: numberOrNull(entry.firstByteMs) === null ? null : entry.timingVersion >= 2 ? 'body_byte' : 'historical_response_headers',
+    firstByteMeaning: validDuration(entry.firstByteMs, total) === null ? null : entry.timingVersion >= 2 ? 'body_byte' : 'historical_response_headers',
     attempts: normalizeAttempts(entry.attempts), errorType: entry.errorType || '',
     ...timingMetrics({ ...entry, ttftMs: firstToken }),
   }
@@ -373,6 +375,52 @@ function speedSummary(entries) {
     outputTpsSamples: output.length, endToEndTpsSamples: endToEnd.length,
     ttftSamples: entries.filter((entry) => timingMetrics(entry).hasTtft).length,
   }
+}
+
+function latencySummary(entries) {
+  const body = []
+  const headers = []
+  const tokens = []
+  let legacyResponseHeadersSamples = 0
+  for (const entry of entries) {
+    const total = numberOrNull(entry.ms)
+    const firstByte = validDuration(entry.firstByteMs, total)
+    const explicitHeaders = validDuration(entry.responseHeadersMs, total)
+    if (entry.timingVersion >= 2 && firstByte !== null) body.push(firstByte)
+    if (explicitHeaders !== null) headers.push(explicitHeaders)
+    else if (!(entry.timingVersion >= 2) && firstByte !== null) {
+      headers.push(firstByte)
+      legacyResponseHeadersSamples++
+    }
+    const ttft = validDuration(entry.ttftMs, total) ?? validDuration(entry.firstTokenMs, total)
+    if (ttft !== null) tokens.push(ttft)
+  }
+  return {
+    averageFirstByteMs: average(body), firstByteSamples: body.length,
+    averageResponseHeadersMs: average(headers), responseHeadersSamples: headers.length,
+    legacyResponseHeadersSamples,
+    averageFirstTokenMs: average(tokens), firstTokenSamples: tokens.length,
+  }
+}
+
+function addCacheSample(summary, entry) {
+  const prompt = numberOrNull(entry.promptTokens)
+  const cached = numberOrNull(entry.cachedTokens)
+  // Missing counts are unknown; negative or impossible pairs are not measurements.
+  if (prompt === null || cached === null || prompt < 0 || cached < 0 || cached > prompt) return
+  summary.cacheHitSamples++
+  summary.cacheHitPromptTokens += prompt
+  summary.cacheHitCachedTokens += cached
+}
+
+function cacheRate(summary) {
+  return summary.cacheHitPromptTokens > 0 ? roundRate(summary.cacheHitCachedTokens / summary.cacheHitPromptTokens) : null
+}
+
+function cacheSummary(entries) {
+  const summary = { cacheHitSamples: 0, cacheHitPromptTokens: 0, cacheHitCachedTokens: 0 }
+  for (const entry of entries) addCacheSample(summary, entry)
+  return { ...summary, cacheHitRate: cacheRate(summary) }
 }
 
 function normalizeAttempts(value) {

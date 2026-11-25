@@ -55,7 +55,7 @@ async function startUpstream(handler) {
 }
 
 async function startProxy(options) {
-  const server = createProxyServer(options.config, options)
+  const server = createProxyServer(options.config, { fetchImpl: (url, init) => new URL(url).hostname === '127.0.0.1' ? fetch(url, init) : Promise.resolve(new Response('', { status: 503 })), ...options })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   return { server, port: server.address().port }

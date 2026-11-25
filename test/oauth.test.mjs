@@ -36,7 +36,7 @@ function fakeOauthFetch(uid = '70086000334832078') {
 }
 
 async function launch(t, { config = fixture(), oauthManager } = {}) {
-  const server = createProxyServer(config, { persistConfig: async () => {}, oauthManager })
+  const server = createProxyServer(config, { persistConfig: async () => {}, oauthManager, fetchImpl: async () => new Response('', { status: 503 }) })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   t.after(async () => { server.closeAllConnections?.(); await new Promise((resolve) => server.close(resolve)) })

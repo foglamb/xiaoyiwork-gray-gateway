@@ -9,7 +9,7 @@ import ModelsView from './components/ModelsView.vue'
 import LogsView from './components/LogsView.vue'
 import SettingsView from './components/SettingsView.vue'
 import ToastStack from './components/ToastStack.vue'
-import { adminKey, setAdminKey } from './composables/useApi.js'
+import { adminKey, setAdminKey, authLifecycle } from './composables/useApi.js'
 import { state, loading, refreshAll } from './composables/useDashboard.js'
 import { loadTableLogs } from './composables/useLogs.js'
 import { usePolling } from './composables/usePolling.js'
@@ -41,27 +41,31 @@ async function refreshCurrent() {
 const poller = usePolling(refreshCurrent, { intervalMs: 20000, enabled: false })
 
 async function boot() {
+  const generation = authLifecycle.capture()
   if (!adminKey.value) { ready.value = true; return }
   try {
     await refreshAll()
+    if (!authLifecycle.current(generation)) return
     authed.value = true
     if (autoRefresh.value) poller.start()
   } catch (error) {
-    if (error.status === 401) setAdminKey('')
+    if (!authLifecycle.current(generation)) return
+    if (error.status === 401) { setAdminKey(''); authed.value = false; ready.value = true }
     else notify(error.message, 'err')
   } finally {
-    ready.value = true
+    if (authLifecycle.current(generation)) ready.value = true
   }
 }
 
 function onAuthenticated() {
-  authed.value = true
+  ready.value = false
   boot()
 }
 
 function logout() {
   setAdminKey('')
   authed.value = false
+  ready.value = true
   poller.stop()
 }
 
@@ -69,7 +73,7 @@ async function manualRefresh() {
   try { await refreshCurrent() } catch (error) { notify(error.message, 'err') }
 }
 
-watch(autoRefresh, (on) => (on ? poller.start() : poller.stop()))
+watch([autoRefresh, authed], ([on, authenticated]) => (on && authenticated ? poller.start() : poller.stop()))
 
 onMounted(boot)
 </script>

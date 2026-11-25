@@ -12,7 +12,7 @@
     "start:lan": "node src/cli.mjs --lan --open",
     "dev": "node --watch src/cli.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "check": "node --check src/server.mjs && node --check src/pool.mjs && node --check src/canary.mjs && node --check src/upstream.mjs && node --check src/requestlog.mjs && node --check src/network.mjs && node --check src/cli.mjs && node --check src/proxy.mjs && node --check src/panel/panel.js"
+    "check": "node --check src/server.mjs && node --check src/pool.mjs && node --check src/canary.mjs && node --check src/upstream.mjs && node --check src/requestlog.mjs && node --check src/network.mjs && node --check src/cli.mjs && node --check src/proxy.mjs && node --check src/panel/app.js"
   },
   "license": "MIT"
 }

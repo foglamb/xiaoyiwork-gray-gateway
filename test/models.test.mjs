@@ -80,7 +80,7 @@ test('web model session persists privately, restores cache and redacts cookie', 
   const restored = new ModelCatalog({ configPath, fetchImpl })
   assert.equal(restored.publicStatus().source, 'upstream-cache')
   assert.equal(restored.list(config).find((model) => model.id === 'Real_Kimi').name, 'Real Kimi')
-  restored.clearSession()
+  await restored.clearSession()
   assert.equal(restored.publicStatus().sessionConfigured, false)
   assert.equal(restored.publicStatus().source, 'upstream-cache')
   assert.doesNotMatch(restored.publicStatus().message, /过期/)

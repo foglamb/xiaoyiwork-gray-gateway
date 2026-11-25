@@ -134,12 +134,29 @@ export class AccountPool {
     await rename(temporary, target)
   }
 
-  async renew(account) {
+  async renew(account, { signal } = {}) {
+    if (signal?.aborted) throw signal.reason
     if (!account.refreshToken) throw new HttpError(401, `账号 ${account.id} 凭据失效且未配置 refreshToken`, 'authentication_error')
-    if (this.renewals.has(account.id)) return this.renewals.get(account.id)
-    const task = this.#renew(account).finally(() => this.renewals.delete(account.id))
-    this.renewals.set(account.id, task)
-    return task
+    let task = this.renewals.get(account.id)
+    if (!task) {
+      task = this.#renew(account).finally(() => this.renewals.delete(account.id))
+      this.renewals.set(account.id, task)
+    }
+    // Shared renewal continues for other callers, but each request's deadline
+    // still applies while it waits. Every caller receives the current account.
+    if (signal) {
+      await new Promise((resolve, reject) => {
+        const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason) }
+        signal.addEventListener('abort', abort, { once: true })
+        task.then((value) => { signal.removeEventListener('abort', abort); resolve(value) },
+          (error) => { signal.removeEventListener('abort', abort); reject(error) })
+        if (signal.aborted) abort()
+      })
+    } else await task
+    const current = Object.values(this.config.accounts).flat().find((item) => item.id === account.id && item.uid === account.uid)
+    if (!current) throw new HttpError(409, '续期期间账号已移除', 'account_changed')
+    Object.assign(account, current)
+    return account
   }
 
   #upstreamOrigin() {
@@ -147,7 +164,8 @@ export class AccountPool {
     return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname) ? origin : HAG
   }
 
-  async #renew(account) {    // accessToken has a short freshness window. Refresh and issue back-to-back;
+  async #renew(account) {
+    // accessToken has a short freshness window. Refresh and issue back-to-back;
     // never cache the intermediate accessToken.
     const base = this.#upstreamOrigin()
     const refreshedResponse = await this.fetch(`${base}/user-credential/v1/xiaoyiwork/refresh-token`, {
@@ -273,7 +291,7 @@ export class AccountPool {
         if ([401, 403].includes(response.status) && account.refreshToken) {
           await response.body?.cancel().catch(() => {})
           try {
-            await track(account, 'renewal', () => this.renew(account))
+            await track(account, 'renewal', () => this.renew(account, { signal }))
             if (signal?.aborted) throw signal.reason
             response = await execute('chat-after-renewal')
           } catch (error) {

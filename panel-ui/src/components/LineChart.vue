@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, useId } from 'vue'
+import { finiteMetric, contiguousSegments } from '../lib/panel.js'
 import { compact } from '../composables/useFormat.js'
 
 const props = defineProps({
@@ -77,20 +78,13 @@ function smoothPath(values) {
   return d
 }
 
-function coordsFor(line) {
-  const list = visible.value
-  return list.map((point, i) => ({ x: xAt(i, list.length), y: yAt(point[line.key]) }))
+function segmentsFor(line) {
+  return contiguousSegments(visible.value, line.key).map((segment) => segment.map(({ index, value }) => ({ x: xAt(index, visible.value.length), y: yAt(value) })))
 }
-
-function pathFor(line) {
-  return smoothPath(coordsFor(line))
-}
-
+function pathFor(line) { return segmentsFor(line).map(smoothPath).join(' ') }
 function areaFor(line) {
-  const coords = coordsFor(line)
-  if (!coords.length) return ''
   const base = PAD.value.top + plotH.value
-  return `${smoothPath(coords)} L${coords[coords.length - 1].x.toFixed(1)},${base} L${coords[0].x.toFixed(1)},${base} Z`
+  return segmentsFor(line).map((coords) => `${smoothPath(coords)} L${coords.at(-1).x.toFixed(1)},${base} L${coords[0].x.toFixed(1)},${base} Z`).join(' ')
 }
 
 function label(at) {
@@ -141,7 +135,7 @@ function onMove(event) {
     at: point.at,
     requests: point.requests,
     pct: (xAt(index, list.length) / W.value) * 100,
-    values: props.series.map((line) => ({ key: line.key, raw: Number(point[line.key]) || 0 })),
+    values: props.series.map((line) => ({ key: line.key, raw: finiteMetric(point[line.key]) })),
   }
 }
 
@@ -150,16 +144,17 @@ const hoverRows = computed(() => {
   if (!snap) return []
   return props.series.map((line) => {
     const entry = snap.values.find((item) => item.key === line.key)
-    const raw = entry ? entry.raw : 0
+    const raw = entry ? entry.raw : null
     return {
       label: line.label,
       color: line.color,
-      value: props.yFormat === 'percent' ? `${raw.toFixed(1)}%` : compact(raw),
+      value: raw === null ? '—' : props.yFormat === 'percent' ? `${raw.toFixed(1)}%` : compact(raw),
     }
   })
 })
 
 /** y coordinate for a series in the frozen snapshot. */
+function hoverKnown(key) { return hover.value?.values.some((entry) => entry.key === key && entry.raw !== null) }
 function hoverY(key) {
   const snap = hover.value
   if (!snap) return 0
@@ -198,8 +193,8 @@ function hoverY(key) {
         <template v-if="hover">
           <line :x1="xAt(hover.index, visible.length)" :x2="xAt(hover.index, visible.length)" :y1="PAD.top" :y2="PAD.top + plotH" class="cursor" />
           <g v-for="line in series" :key="`h${line.key}`">
-            <circle :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="5.5" class="dot-halo" :fill="line.color" />
-            <circle :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="2.8" class="dot" :fill="line.color" />
+            <circle v-if="hoverKnown(line.key)" :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="5.5" class="dot-halo" :fill="line.color" />
+            <circle v-if="hoverKnown(line.key)" :cx="xAt(hover.index, visible.length)" :cy="hoverY(line.key)" r="2.8" class="dot" :fill="line.color" />
           </g>
         </template>
       </g>

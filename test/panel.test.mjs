@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createProxyServer } from '../src/server.mjs'
+import { bucketFor } from '../src/canary.mjs'
 import { panelAuthorized } from '../src/network.mjs'
 
 function fixture() {
@@ -23,7 +24,7 @@ function fixture() {
 }
 
 async function launch(t, { config = fixture(), persistConfig = async () => {} } = {}) {
-  const server = createProxyServer(config, { persistConfig })
+  const server = createProxyServer(config, { persistConfig, fetchImpl: async () => new Response('', { status: 503 }) })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const base = `http://127.0.0.1:${server.address().port}`
@@ -78,11 +79,38 @@ test('state exposes account pool metadata and model information without secrets'
   assert.doesNotMatch(JSON.stringify(data), /credential-(stable|gray)|refresh-gray|test-admin-key|test-proxy-key/)
 })
 
-test('account add/delete persists credentials server-side and prevents empty pools', async (t) => {
+test('gray preview is admin-authenticated, read-only, and matches the routing bucket threshold', async (t) => {
+  const { base, admin, config } = await launch(t)
+  const payload = { identity: 'preview-user', salt: 'preview-salt', percentage: 37.5 }
+  const body = JSON.stringify(payload)
+  const unauthorized = await fetch(`${base}/api/gray/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+  assert.equal(unauthorized.status, 401)
+  const apiKeyOnly = await fetch(`${base}/api/gray/preview`, { method: 'POST', headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' }, body })
+  assert.equal(apiKeyOnly.status, 401)
+
+  const response = await fetch(`${base}/api/gray/preview`, { method: 'POST', headers: jsonHeaders(admin), body })
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  const bucket = bucketFor(payload.identity, payload.salt)
+  assert.deepEqual(result, { identity: payload.identity, salt: payload.salt, bucket, gray: bucket < Math.round(payload.percentage * 100) })
+
+  for (const invalid of [
+    { ...payload, identity: ' ' },
+    { ...payload, salt: '' },
+    { ...payload, percentage: -0.1 },
+    { ...payload, percentage: 100.1 },
+    { ...payload, percentage: '50' },
+  ]) {
+    const bad = await fetch(`${base}/api/gray/preview`, { method: 'POST', headers: jsonHeaders(admin), body: JSON.stringify(invalid) })
+    assert.equal(bad.status, 400)
+  }
+})
+
+ test('account add/delete persists credentials server-side and prevents empty pools', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'xiaoyi-panel-test-'))
   const configPath = join(directory, 'config.json')
   const config = fixture()
-  const server = createProxyServer(config, { configPath })
+  const server = createProxyServer(config, { configPath, fetchImpl: async () => new Response('', { status: 503 }) })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   t.after(async () => {

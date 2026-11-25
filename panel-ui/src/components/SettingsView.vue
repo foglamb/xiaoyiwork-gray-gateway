@@ -1,9 +1,9 @@
 <script setup>
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CodeBlock from './CodeBlock.vue'
 import { state, acceptSettingsSnapshot } from '../composables/useDashboard.js'
-import { api, setAdminKey } from '../composables/useApi.js'
+import { api, setAdminKey, authLifecycle } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 import { cloneSettings, settingsFromState, settingsEqual, settingsSync, settingsPayload, savedSettings } from '../lib/settings.js'
 
@@ -14,7 +14,9 @@ const baseline = shallowRef(cloneSettings(tune.value))
 const dirty = computed(() => !settingsEqual(tune.value, baseline.value))
 const savingTune = shallowRef(false)
 const allModels = computed(() => state.value?.models || [])
-const draft = shallowRef({ apiKey: '', adminKey: '' })
+const draft = ref({ apiKey: '', adminKey: '' })
+let disposed = false
+onBeforeUnmount(() => { disposed = true; keys.value = { apiKey: '', adminKey: '' }; draft.value = { apiKey: '', adminKey: '' } })
 const busy = shallowRef(false)
 const revealed = shallowRef(false)
 
@@ -34,11 +36,11 @@ async function saveTune() {
   const submitted = cloneSettings(tune.value)
   savingTune.value = true
   try {
-    await api('/api/settings', { method: 'POST', body: settingsPayload(submitted) })
-    const saved = savedSettings(tune.value, submitted)
+    const response = await api('/api/settings', { method: 'POST', body: settingsPayload(submitted) })
+    const saved = savedSettings(tune.value, submitted, response)
     baseline.value = saved.baseline
     tune.value = saved.draft
-    acceptSettingsSnapshot(submitted)
+    acceptSettingsSnapshot(saved.baseline)
     notify('运行参数已保存并生效', 'ok')
     emit('changed')
   } catch (error) {
@@ -50,8 +52,10 @@ async function saveTune() {
 
 onMounted(async () => {
   try {
-    keys.value = await api('/api/keys')
-    draft.value = { ...keys.value }
+    const result = await api('/api/keys')
+    if (disposed) return
+    keys.value = result
+    draft.value = { ...result }
   } catch (error) {
     notify(error.message, 'err')
   }
@@ -60,11 +64,14 @@ onMounted(async () => {
 const masked = (value) => (revealed.value ? value : value ? '••••••••••••••••' : '—')
 
 async function saveKeys() {
+  const generation = authLifecycle.capture()
+  const submitted = { ...draft.value }
   busy.value = true
   try {
-    const next = await api('/api/keys', { method: 'POST', body: draft.value })
+    const next = await api('/api/keys', { method: 'POST', body: submitted })
+    if (disposed || !authLifecycle.current(generation)) return
     keys.value = next
-    draft.value = { ...next }
+    draft.value = Object.fromEntries(Object.keys(next).map((key) => [key, draft.value[key] === submitted[key] ? next[key] : draft.value[key]]))
     setAdminKey(next.adminKey)
     notify('密钥已更新，管理密钥同步生效', 'ok')
     emit('changed')
@@ -244,8 +251,8 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
 
     <section class="card card-pad">
       <span class="kicker">Models</span>
-      <h3 class="mt">灰度模型白名单</h3>
-      <p class="muted tiny mb">勾选的模型默认不对普通请求开放，需在灰度控制台里决定是否对外暴露。</p>
+      <h3 class="mt">灰度模型策略</h3>
+      <p class="muted tiny mb">勾选后按本地灰度池策略处理；是否开放调用由灰度控制台决定。上游灰度标记不会自动改变本地策略。Kimi_K3.1_Pro_VE 为内置灰度模型，取消此处勾选也不会解除内置限制。</p>
       <div class="model-pick">
         <label v-for="m in allModels" :key="m.id" class="pick" :class="{ on: tune.grayModelIds.includes(m.id) }">
           <input v-model="tune.grayModelIds" type="checkbox" :value="m.id" />
@@ -253,7 +260,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         </label>
       </div>
       <div class="row save-row">
-        <button class="btn btn-primary" type="button" :disabled="savingTune || !dirty" @click="saveTune">保存模型白名单</button>
+        <button class="btn btn-primary" type="button" :disabled="savingTune || !dirty" @click="saveTune">保存模型策略</button>
       </div>
     </section>
 

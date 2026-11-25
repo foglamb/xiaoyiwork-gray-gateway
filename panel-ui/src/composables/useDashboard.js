@@ -1,5 +1,5 @@
 import { computed, ref, shallowRef } from 'vue'
-import { api } from './useApi.js'
+import { api, onSessionChange } from './useApi.js'
 import { createRequestGate } from '../lib/logs.js'
 
 // Shared overview state: one owner (App.vue) polls, every view reads.
@@ -72,4 +72,19 @@ export async function refreshQuota(id) {
 export function stopPolling() {
   stateRequests.invalidate()
   overviewRequests.invalidate()
+}
+
+onSessionChange(() => {
+  stateRequests.invalidate()
+  overviewRequests.invalidate()
+  state.value = null
+  logData.value = null
+  lastError.value = ''
+})
+
+export function acceptGraySnapshot(confirmed) {
+  stateRequests.invalidate()
+  if (!state.value) return
+  const { allowGrayModels, ...gray } = confirmed
+  state.value = { ...state.value, gray, allowGrayModels }
 }

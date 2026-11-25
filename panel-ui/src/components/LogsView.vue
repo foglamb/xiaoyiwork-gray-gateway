@@ -3,6 +3,7 @@ import { computed, onMounted, shallowRef } from 'vue'
 import { state, refreshAll } from '../composables/useDashboard.js'
 import { logQuery, tableData, tableEntries as logs, tableStats as logStats, tableBusy as busy, tableError, loadTableLogs as load, updateLogQuery, resumeLatestLogs } from '../composables/useLogs.js'
 import { latencyStages, stageStyle, logsCsv, measuredOutputTps } from '../lib/logs.js'
+import { cacheRate } from '../lib/panel.js'
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 import AppIcon from './AppIcon.vue'
@@ -49,7 +50,7 @@ function statusTone(entry) {
   return 'ok'
 }
 function hitRate(entry) {
-  return entry.promptTokens ? ((entry.cachedTokens || 0) / entry.promptTokens) * 100 : null
+  return cacheRate(entry)
 }
 onMounted(load)
 </script>
@@ -62,7 +63,7 @@ onMounted(load)
       <div class="mini card"><span>P50 / P95 耗时</span><b>{{ ms(logStats.p50Ms) }} <small>/ {{ ms(logStats.p95Ms) }}</small></b></div>
       <div class="mini card"><span>平均首 Token</span><b>{{ ms(logStats.averageFirstTokenMs) }}</b><em>{{ num(logStats.ttftSamples) }} 个有效样本 · 首字节 {{ ms(logStats.averageFirstByteMs) }}</em></div>
       <div class="mini card"><span>端到端输出速度</span><b>{{ tps(logStats.endToEndTps) }}</b><em>{{ num(logStats.endToEndTpsSamples) }} 个有效样本 · 含等待</em></div>
-      <div class="mini card"><span>缓存命中率</span><b class="good">{{ pct(logStats.cacheHitRate) }}</b></div>
+      <div class="mini card"><span>缓存命中率</span><b class="good">{{ pct(logStats.cacheHitRate) }}</b><em>{{ num(logStats.cacheHitSamples) }} 个完整样本</em></div>
       <div class="mini card" :title="`输入 ${exact(logStats.promptTokens24h)} + 输出 ${exact(logStats.completionTokens24h)}`"><span>总 Token</span><b>{{ compact(logStats.tokens24h || 0) }}</b></div>
     </div>
 

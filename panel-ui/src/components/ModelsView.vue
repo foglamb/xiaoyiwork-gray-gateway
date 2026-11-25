@@ -1,5 +1,7 @@
 <script setup>
 import { computed, shallowRef } from 'vue'
+import { copyText } from '../lib/clipboard.js'
+import { modelBadges } from '../lib/panel.js'
 import AppIcon from './AppIcon.vue'
 import BaseDialog from './BaseDialog.vue'
 import { models, state } from '../composables/useDashboard.js'
@@ -47,13 +49,12 @@ async function refreshModels() {
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
-  if (!q) return models.value
-  return models.value.filter((m) => m.id.toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q))
+  return models.value.filter((m) => !q || m.id.toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q)).map((model) => ({ ...model, badges: modelBadges(model) }))
 })
 
 async function copy(id) {
-  await navigator.clipboard.writeText(id).catch(() => {})
-  notify(`已复制 ${id}`, 'ok', 1600)
+  try { await copyText(id); notify(`已复制 ${id}`, 'ok', 1600) }
+  catch (error) { notify(error.message, 'err') }
 }
 </script>
 
@@ -66,7 +67,7 @@ async function copy(id) {
       </div>
       <span class="muted tiny">{{ filtered.length }} / {{ models.length }} 个模型</span>
       <button class="btn btn-sm" type="button" @click="sessionOpen = true">
-        {{ catalog.sessionConfigured ? '更新目录会话' : '导入目录 Cookie' }}
+        {{ catalog.sessionConfigured ? '更新备用会话' : '配置备用会话' }}
       </button>
       <button v-if="catalog.sessionConfigured" class="btn btn-sm btn-ghost" type="button" @click="clearSession">清除会话</button>
       <button class="btn btn-sm" type="button" :disabled="refreshing" @click="refreshModels">
@@ -74,7 +75,10 @@ async function copy(id) {
       </button>
     </div>
     <div class="catalog-note" :class="{ warn: catalog.ok === false }">
-      {{ catalog.message || '模型目录准备中' }}；{{ catalog.sessionConfigured ? '网页目录会话已保存' : '尚未保存网页目录会话' }}。
+      {{ catalog.message || '模型目录准备中' }}。优先使用账号目录，网页会话仅作备用。
+      {{ catalog.transport === 'hag' ? '当前来源：账号目录。' : catalog.transport === 'web' ? '当前来源：网页备用目录。' : '' }}
+      {{ catalog.stale ? '当前显示上次成功获取的缓存。' : '' }}
+      <span v-if="catalog.lastSuccessAt">上次成功：{{ new Date(catalog.lastSuccessAt).toLocaleString('zh-CN') }}。</span>
       标记为「调用记录」的模型来自真实请求，不是上游目录。
     </div>
 
@@ -82,12 +86,14 @@ async function copy(id) {
       <article v-for="model in filtered" :key="model.id" class="model card" @click="copy(model.id)">
         <div class="model-head">
           <strong class="truncate">{{ model.name || model.id }}</strong>
-          <span v-if="model.gray" class="badge warn">灰度</span>
+          <span class="badge" :class="{ warn: model.upstreamGray === true }">{{ model.badges.upstream }}</span>
         </div>
         <code class="model-id truncate">{{ model.id }}</code>
         <p v-if="model.description" class="model-desc">{{ model.description }}</p>
         <div class="model-meta">
-          <span v-if="model.vision" class="badge info">视觉</span>
+          <span class="badge">{{ model.badges.vision }}</span>
+          <span class="badge" :class="{ warn: model.gatewayGray }">{{ model.badges.gateway }}</span>
+          <span class="badge" :class="{ warn: model.gatewayAllowed === false }">{{ model.badges.availability }}</span>
           <span class="badge">{{ sourceLabel[model.source] || model.source || '记录' }}</span>
           <span class="grow" />
           <span class="copy-hint"><AppIcon name="copy" :size="11" /> 复制</span>
@@ -134,7 +140,7 @@ async function copy(id) {
 .model-head strong { font-size: 12.5px; font-weight: 620; }
 .model-id { font-size: 10.5px; color: var(--dim); }
 .model-desc { min-height: 16px; font-size: 10.5px; line-height: 1.5; color: var(--dim); }
-.model-meta { display: flex; align-items: center; gap: 5px; margin-top: auto; }
+.model-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: auto; }
 .catalog-note { padding: 0 2px; font-size: 11px; color: var(--dim); line-height: 1.55; }
 .catalog-note.warn { color: var(--amber); }
 .copy-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim-2); opacity: 0; transition: opacity var(--dur-1) var(--ease); }

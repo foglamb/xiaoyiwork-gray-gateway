@@ -1,5 +1,5 @@
 import { computed, shallowRef } from 'vue'
-import { api } from './useApi.js'
+import { api, onSessionChange } from './useApi.js'
 import { changeLogQuery, createRequestGate, defaultLogQuery, logQueryString } from '../lib/logs.js'
 
 // Table state has its own lifetime and never writes overview data.
@@ -40,3 +40,11 @@ export function updateLogQuery(patch) {
 export function resumeLatestLogs() {
   return updateLogQuery({ page: 1, until: null })
 }
+
+onSessionChange(() => {
+  requests.invalidate()
+  tableData.value = null
+  logQuery.value = defaultLogQuery()
+  tableBusy.value = false
+  tableError.value = ''
+})

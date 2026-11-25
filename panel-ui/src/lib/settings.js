@@ -1,3 +1,4 @@
+import { mergeConfirmed } from './panel.js'
 export const cloneSettings = (value) => ({ ...value, grayModelIds: [...(value.grayModelIds || [])] })
 
 export function settingsFromState(state) {
@@ -33,6 +34,7 @@ export function settingsPayload(draft) {
 }
 
 // Receives the submitted snapshot, never a poll response or a later edit.
-export function savedSettings(draft, submitted) {
-  return { baseline: cloneSettings(submitted), draft: cloneSettings(draft) }
+export function savedSettings(draft, submitted, response = settingsPayload(submitted)) {
+  const confirmed = settingsFromState({ requestTimeoutMs: response.requestTimeoutMs, settings: { ...response, grayModelIds: response.grayModels || [] } })
+  return { baseline: cloneSettings(confirmed), draft: cloneSettings(mergeConfirmed(draft, submitted, confirmed)) }
 }

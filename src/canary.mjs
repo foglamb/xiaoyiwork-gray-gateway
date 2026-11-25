@@ -59,6 +59,13 @@ function parseBoolean(value, name) {
   throw new HttpError(400, `${name} 必须是 true/false 或 1/0`, 'invalid_canary_override')
 }
 
+/** Local routing restrictions, separate from the provider's rollout flag. */
+export function modelPolicy(config, id) {
+  const gatewayGray = GRAY_MODELS.has(id) || (config.grayModels || []).includes(id) || (config.gray?.models || []).includes(id)
+  return { gatewayGray, gatewayAllowed: !gatewayGray || config.allowGrayModels === true,
+    gatewayPolicy: gatewayGray ? 'gray-pool' : 'traffic-split' }
+}
+
 export function routeGray(request, config, body = {}) {
   const gray = config.gray
   const identity = requestIdentity(request)
@@ -93,8 +100,7 @@ export function routeGray(request, config, body = {}) {
     reason = selected ? 'percentage' : 'stable'
   }
 
-  const grayModels = new Set([...GRAY_MODELS, ...(config.grayModels || []), ...(gray.models || [])])
-  const wantsGrayModel = grayModels.has(body.model)
+  const wantsGrayModel = modelPolicy(config, body.model).gatewayGray
   if (wantsGrayModel) {
     if (!config.allowGrayModels) {
       throw new HttpError(403, `模型 ${body.model} 默认禁用；确认灰度范围和倍率后设置 allowGrayModels=true`, 'gray_model_disabled')

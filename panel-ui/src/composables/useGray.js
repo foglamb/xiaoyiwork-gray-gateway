@@ -40,17 +40,7 @@ export async function saveGray(patch) {
   }
 }
 
-/** Same bucketing the server uses, so the preview matches real routing. */
-export async function sha256Hex(text) {
-  const data = new TextEncoder().encode(text)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
+/** Server preview also works on HTTP LAN pages without Web Crypto. */
 export async function previewBucket(identity, salt, percentage) {
-  const hash = await sha256Hex(`${salt}:${identity}`)
-  // Mirror the server exactly: unsigned big-endian uint32 of the first 4 bytes.
-  const bucket = parseInt(hash.slice(0, 8), 16) >>> 0
-  const value = bucket % 10000
-  return { identity, salt, bucket: value, gray: value < Number(percentage) * 100 }
+  return api('/api/gray/preview', { method: 'POST', body: { identity, salt, percentage: Number(percentage) } })
 }
