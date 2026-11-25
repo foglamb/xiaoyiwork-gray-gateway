@@ -1,11 +1,11 @@
-import { onBeforeUnmount, onMounted, shallowRef, watch } from 'vue'
+import { onBeforeUnmount, onMounted, shallowRef } from 'vue'
 
 /**
  * Interval that respects page visibility: no work while the tab is hidden and
  * no overlapping runs when a refresh takes longer than the interval.
  */
 export function usePolling(task, { intervalMs = 15000, enabled = true } = {}) {
-  const active = shallowRef(true)
+  const active = shallowRef(false)
   const running = shallowRef(false)
   let timer = null
 
@@ -18,11 +18,12 @@ export function usePolling(task, { intervalMs = 15000, enabled = true } = {}) {
 
   function start() {
     stop()
-    if (!active.value) return
+    active.value = true
     timer = setInterval(tick, intervalMs)
   }
 
   function stop() {
+    active.value = false
     if (timer) clearInterval(timer)
     timer = null
   }
@@ -39,7 +40,6 @@ export function usePolling(task, { intervalMs = 15000, enabled = true } = {}) {
     stop()
     document.removeEventListener('visibilitychange', onVisibility)
   })
-  watch(active, (value) => (value ? start() : stop()))
 
   return { active, running, tick, start, stop }
 }

@@ -1,13 +1,17 @@
 <script setup>
 import { computed, shallowRef } from 'vue'
 import { compact, exact } from '../composables/useFormat.js'
+import { proportionalHeight } from '../lib/logs.js'
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
   modelNames: { type: Object, default: () => ({}) },
 })
 
-const activeIndex = shallowRef(null)
+const hoveredIndex = shallowRef(null)
+const focusedIndex = shallowRef(null)
+const selectedIndex = shallowRef(null)
+const activeIndex = computed(() => hoveredIndex.value ?? focusedIndex.value ?? selectedIndex.value)
 
 const bars = computed(() => props.rows.map((row) => {
   const cached = Number(row.cached) || 0
@@ -37,13 +41,16 @@ const ticks = computed(() => [1, 0.75, 0.5, 0.25, 0].map((fraction) => ({
 const activeBar = computed(() => activeIndex.value === null ? null : bars.value[activeIndex.value] || null)
 
 function barHeight(bar) {
-  return bar.total > 0 ? Math.max(1, (bar.total / maxTotal.value) * 100) : 0
+  return proportionalHeight(bar.total, maxTotal.value)
 }
 function segmentHeight(value, total) {
   return total ? (value / total) * 100 : 0
 }
+function hover(event, index) {
+  if (event.pointerType === 'mouse') hoveredIndex.value = index
+}
 function select(index) {
-  activeIndex.value = activeIndex.value === index ? null : index
+  selectedIndex.value = selectedIndex.value === index ? null : index
 }
 </script>
 
@@ -82,10 +89,10 @@ function select(index) {
             <button
               v-for="(bar, index) in bars" :key="bar.id" type="button"
               class="column" :class="{ active: activeIndex === index }"
-              :aria-pressed="activeIndex === index"
+              :aria-pressed="selectedIndex === index"
               :aria-label="`${bar.name}，总 Token ${exact(bar.total)}，${bar.requests} 次请求`"
-              @mouseenter="activeIndex = index" @mouseleave="activeIndex = null"
-              @focus="activeIndex = index" @blur="activeIndex = null" @click="select(index)"
+              @pointerenter="hover($event, index)" @pointerleave="hoveredIndex = null"
+              @focus="focusedIndex = index" @blur="focusedIndex = null" @click="select(index)"
             >
               <span class="bar-value" :title="exact(bar.total)">{{ compact(bar.total) }}</span>
               <span class="bar-space">
@@ -133,14 +140,14 @@ function select(index) {
 .completion { background: var(--accent-2); }
 .chart-scroll { overflow-x: auto; overscroll-behavior-x: contain; margin-top: 16px; }
 .chart-layout { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 10px; min-width: min(100%, calc(var(--count) * 92px)); }
-.y-axis { height: 220px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-bottom: 1px; color: var(--dim-2); font-family: var(--font-mono); font-size: 9px; font-variant-numeric: tabular-nums; }
-.plot { position: relative; min-width: 0; height: 266px; }
-.grid { position: absolute; inset: 0 0 46px; pointer-events: none; }
+.y-axis { margin-top: 24px; height: 220px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding-bottom: 1px; color: var(--dim-2); font-family: var(--font-mono); font-size: 9px; font-variant-numeric: tabular-nums; }
+.plot { position: relative; min-width: 0; height: 282px; }
+.grid { position: absolute; top: 24px; left: 0; right: 0; height: 220px; pointer-events: none; }
 .grid i { position: absolute; left: 0; right: 0; height: 1px; background: var(--line-soft); }
 .grid i:last-child { background: var(--line); }
-.columns { position: relative; display: grid; grid-template-columns: repeat(var(--count), minmax(72px, 1fr)); gap: 8px; height: 266px; }
+.columns { position: relative; display: grid; grid-template-columns: repeat(var(--count), minmax(72px, 1fr)); gap: 8px; height: 282px; }
 .column {
-  min-width: 0; height: 266px; padding: 0 3px; display: grid;
+  min-width: 0; height: 282px; padding: 0 3px; display: grid;
   grid-template-rows: 20px 220px 17px 13px; gap: 4px;
   color: inherit; background: transparent; border: 0; border-radius: 9px;
   cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;

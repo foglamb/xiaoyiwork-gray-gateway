@@ -99,7 +99,7 @@ const legendValue = (key) => (key === 'fresh' ? freshTokens.value : totals.value
         tone="accent" icon="box"
       />
       <StatCard
-        label="累计总 Token" :value="compact(logStats.allTimeTokens || 0)"
+        label="保留日志累计 Token" :value="compact(logStats.allTimeTokens || 0)"
         :hint="`输入 ${compact(logStats.allTimePromptTokens)} + 输出 ${compact(logStats.allTimeCompletionTokens)}`"
         :title="`保留日志累计：${exact(logStats.allTimePromptTokens)} + ${exact(logStats.allTimeCompletionTokens)} = ${exact(logStats.allTimeTokens)}`"
         icon="box"

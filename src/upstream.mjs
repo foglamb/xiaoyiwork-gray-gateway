@@ -43,7 +43,7 @@ export function patchChunk(value, modelHint) {
  * Preserve complete SSE blocks (including comments), remove its numeric id lines,
  * normalize OpenAI chunk fields, and terminate exactly once with data: [DONE].
  */
-export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstToken, onError, fastFail = true } = {}) {
+export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, heartbeatMs = 15000, onFirstByte, onFirstToken, onError, fastFail = true } = {}) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
@@ -52,7 +52,19 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
   let reader
   let lastWrite = 0
   let firstTokenSeen = false
+  let firstByteSeen = false
   let upstreamErrorSeen = false
+  let errorReported = false
+
+  const reportError = (error) => {
+    if (!errorReported) {
+      errorReported = true
+      onError?.(error)
+    }
+  }
+  const abortFailure = () => signal?.reason instanceof HttpError
+    ? signal.reason
+    : new HttpError(499, '请求已取消', 'client_cancelled')
 
   const enqueue = (controller, text) => {
     if (!outputClosed && text) {
@@ -95,14 +107,20 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
     }
     if (parsed?.error) {
       if (fastFail) upstreamErrorSeen = true
-      onError?.(parsed.error)
+      reportError(parsed.error)
     }
     const text = parsed
       ? `data: ${JSON.stringify(patchChunk(parsed, modelHint))}\n\n`
       : `${lines.join('\n')}\n\n`
-    const choice = parsed?.choices?.[0]
-    const delta = choice?.delta || {}
-    if (!firstTokenSeen && (delta.content || delta.reasoning_content || delta.tool_calls)) {
+    const hasToken = (parsed?.choices || []).some((choice) => {
+      const delta = choice.delta || {}
+      return (typeof delta.content === 'string' && delta.content.length > 0) ||
+        (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) ||
+        (Array.isArray(delta.tool_calls) && delta.tool_calls.some((call) =>
+          (typeof call.function?.name === 'string' && call.function.name.length > 0) ||
+          (typeof call.function?.arguments === 'string' && call.function.arguments.length > 0)))
+    })
+    if (!firstTokenSeen && hasToken) {
       firstTokenSeen = true
       onFirstToken?.()
     }
@@ -117,6 +135,11 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
       const abort = () => reader.cancel(signal?.reason).catch(() => {})
       if (signal?.aborted) {
         await abort()
+        const error = abortFailure()
+        const detail = { message: error.message, type: error.code, status: error.status }
+        reportError(detail)
+        enqueue(controller, `data: ${JSON.stringify({ error: detail })}\n\n`)
+        emitDone(controller)
         close(controller)
         return
       }
@@ -140,8 +163,10 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
                 timer = setTimeout(() => resolve('__beat__'), heartbeatMs)
                 timer.unref?.()
               })
-              const raced = await Promise.race([readPromise.then((value) => ({ value })), beat])
-              clearTimeout(timer)
+              let raced
+              try {
+                raced = await Promise.race([readPromise.then((value) => ({ value })), beat])
+              } finally { clearTimeout(timer) }
               if (raced === '__beat__') {
                 if (Date.now() - lastWrite >= heartbeatMs) enqueue(controller, ': keepalive\n\n')
                 continue
@@ -151,7 +176,12 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
             }
           }
           const { value, done } = result
+          if (signal?.aborted) throw abortFailure()
           if (done) break
+          if (!firstByteSeen && value?.byteLength > 0) {
+            firstByteSeen = true
+            onFirstByte?.()
+          }
           buffer += decoder.decode(value, { stream: true })
           let end
           while (!terminated && !upstreamErrorSeen && (end = findEventBoundary(buffer)) !== null) {
@@ -170,15 +200,17 @@ export function transformSse(upstream, modelHint, { signal, onFrame, onUsage, he
         emitDone(controller)
         close(controller)
       } catch (error) {
-        if (signal?.aborted) {
-          close(controller)
-          return
-        }
-        enqueue(controller, `data: ${JSON.stringify({ error: { message: `上游流中断：${error.message}`, type: 'upstream_stream_error' } })}\n\n`)
+        const failure = signal?.aborted ? abortFailure() : error
+        const detail = signal?.aborted
+          ? { message: failure.message, type: failure.code, status: failure.status }
+          : { message: '上游流中断', type: 'upstream_stream_error', status: 502 }
+        reportError(detail)
+        enqueue(controller, `data: ${JSON.stringify({ error: detail })}\n\n`)
         emitDone(controller)
         close(controller)
       } finally {
         signal?.removeEventListener('abort', abort)
+        reader.releaseLock()
       }
     },
     async cancel(reason) {
@@ -193,8 +225,12 @@ function findEventBoundary(buffer) {
   return match ? { index: match.index, length: match[0].length } : null
 }
 
-export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFirstToken } = {}) {
-  const text = await new Response(transformSse(upstream, modelHint, { signal, onFirstToken, heartbeatMs: 0 })).text()
+export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFirstByte, onFirstToken, onError, fastFail = true } = {}) {
+  const text = await new Response(transformSse(upstream, modelHint, {
+    signal, onUsage, onFirstByte, onFirstToken, onError, fastFail, heartbeatMs: 0,
+  })).text()
+  if (signal?.aborted) throw signal.reason instanceof HttpError
+    ? signal.reason : new HttpError(499, '请求已取消', 'client_cancelled')
   const message = { role: 'assistant', content: '' }
   let reasoning = ''
   const toolCalls = new Map()
@@ -216,7 +252,6 @@ export async function aggregateSse(upstream, modelHint, { signal, onUsage, onFir
     created = chunk.created || created
     model = chunk.model || model
     usage = chunk.usage || usage
-    if (chunk.usage) onUsage?.(chunk.usage)
     for (const choice of chunk.choices || []) {
       const delta = choice.delta || {}
       if (typeof delta.content === 'string') message.content += delta.content

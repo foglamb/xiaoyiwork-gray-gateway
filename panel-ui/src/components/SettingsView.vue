@@ -2,18 +2,16 @@
 import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import CodeBlock from './CodeBlock.vue'
-import { state, refreshAll } from '../composables/useDashboard.js'
+import { state, acceptSettingsSnapshot } from '../composables/useDashboard.js'
 import { api, setAdminKey } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
+import { cloneSettings, settingsFromState, settingsEqual, settingsSync, settingsPayload, savedSettings } from '../lib/settings.js'
 
 const emit = defineEmits(['logout', 'changed'])
 const keys = shallowRef({ apiKey: '', adminKey: '' })
-const tune = ref({
-  requestTimeoutMs: 120000, maxBodyBytes: 10485760, accountProbeMinutes: 15,
-  streamHeartbeatMs: 15000, logMaxEntries: 1000, allowPanelFromLan: false, grayModelIds: [],
-  modelCatalogMinutes: 15, kimiCompatibility: true, normalizeToolSchemas: true,
-  upstreamErrorFastFail: true, upstreamBodyLimitBytes: 4718592,
-})
+const tune = ref(settingsFromState(state.value))
+const baseline = shallowRef(cloneSettings(tune.value))
+const dirty = computed(() => !settingsEqual(tune.value, baseline.value))
 const savingTune = shallowRef(false)
 const allModels = computed(() => state.value?.models || [])
 const draft = shallowRef({ apiKey: '', adminKey: '' })
@@ -24,29 +22,23 @@ const baseUrl = computed(() => state.value?.endpoint?.currentUrl || '')
 const lanUrls = computed(() => state.value?.endpoint?.lanUrls || [])
 
 function syncTune() {
-  const s = state.value?.settings
-  if (!s) return
-  tune.value = {
-    requestTimeoutMs: state.value.requestTimeoutMs ?? 120000,
-    maxBodyBytes: s.maxBodyBytes ?? 10485760,
-    accountProbeMinutes: s.accountProbeMinutes ?? 0,
-    streamHeartbeatMs: s.streamHeartbeatMs ?? 15000,
-    logMaxEntries: s.logMaxEntries ?? 1000,
-    allowPanelFromLan: Boolean(s.allowPanelFromLan),
-    grayModelIds: [...(s.grayModelIds || [])],
-    modelCatalogMinutes: s.modelCatalogMinutes ?? 15,
-    kimiCompatibility: s.kimiCompatibility !== false,
-    normalizeToolSchemas: s.normalizeToolSchemas !== false,
-    upstreamErrorFastFail: s.upstreamErrorFastFail !== false,
-    upstreamBodyLimitBytes: s.upstreamBodyLimitBytes ?? 4718592,
-  }
+  const next = settingsSync(tune.value, baseline.value, state.value, savingTune.value)
+  if (!next) return
+  baseline.value = cloneSettings(next)
+  tune.value = next
 }
-watch(() => state.value?.settings, syncTune, { immediate: true, deep: true })
+watch(() => state.value, syncTune, { immediate: true })
+function resetTune() { tune.value = cloneSettings(baseline.value) }
 
 async function saveTune() {
+  const submitted = cloneSettings(tune.value)
   savingTune.value = true
   try {
-    await api('/api/settings', { method: 'POST', body: tune.value })
+    await api('/api/settings', { method: 'POST', body: settingsPayload(submitted) })
+    const saved = savedSettings(tune.value, submitted)
+    baseline.value = saved.baseline
+    tune.value = saved.draft
+    acceptSettingsSnapshot(submitted)
     notify('运行参数已保存并生效', 'ok')
     emit('changed')
   } catch (error) {
@@ -65,7 +57,7 @@ onMounted(async () => {
   }
 })
 
-const masked = (value) => (revealed.value ? value : `${value.slice(0, 8)}${'•'.repeat(18)}${value.slice(-4)}`)
+const masked = (value) => (revealed.value ? value : value ? '••••••••••••••••' : '—')
 
 async function saveKeys() {
   busy.value = true
@@ -93,12 +85,12 @@ async function rotate(field) {
 
 const clientConfig = computed(() => JSON.stringify({
   baseURL: baseUrl.value,
-  apiKey: keys.value.apiKey,
+  apiKey: revealed.value ? keys.value.apiKey : 'YOUR_API_KEY',
   model: state.value?.models?.[0]?.id || 'Kimi_K3.1_Pro_VE',
 }, null, 2))
 
 const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
-  -H "Authorization: Bearer ${keys.value.apiKey}" \\
+  -H "Authorization: Bearer ${revealed.value ? keys.value.apiKey : 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"${state.value?.models?.[0]?.id || 'Kimi_K3.1_Pro_VE'}","messages":[{"role":"user","content":"你好"}]}'`)
 </script>
@@ -129,7 +121,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         <div class="field">
           <label>Admin Key（面板登录）</label>
           <div class="row">
-            <input v-model="draft.adminKey" class="input mono-input" spellcheck="false" />
+            <input v-model="draft.adminKey" :type="revealed ? 'text' : 'password'" autocomplete="new-password" class="input mono-input" spellcheck="false" />
             <button class="btn btn-sm" type="button" @click="rotate('adminKey')"><AppIcon name="spark" :size="12" /> 生成</button>
           </div>
           <span class="muted tiny">当前：{{ masked(keys.adminKey || '') }}</span>
@@ -137,7 +129,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         <div class="field">
           <label>API Key（客户端调用）</label>
           <div class="row">
-            <input v-model="draft.apiKey" class="input mono-input" spellcheck="false" />
+            <input v-model="draft.apiKey" :type="revealed ? 'text' : 'password'" autocomplete="new-password" class="input mono-input" spellcheck="false" />
             <button class="btn btn-sm" type="button" @click="rotate('apiKey')"><AppIcon name="spark" :size="12" /> 生成</button>
           </div>
           <span class="muted tiny">当前：{{ masked(keys.apiKey || '') }}</span>
@@ -168,7 +160,8 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
     <section class="card card-pad">
       <span class="kicker">Tuning</span>
       <h3 class="mt">运行调优</h3>
-      <p class="muted tiny mb">这些参数保存后立即生效，无需重启。</p>
+      <p class="muted tiny mb">这些参数保存后立即生效，无需重启。{{ dirty ? '有未保存修改，自动刷新会保留编辑内容。' : '当前设置已同步。' }}</p>
+      <button v-if="dirty" class="btn btn-sm mb" type="button" :disabled="savingTune" @click="resetTune">撤销未保存修改</button>
       <div class="tune-grid">
         <div class="field">
           <label>请求超时 requestTimeoutMs</label>
@@ -205,7 +198,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         </div>
       </div>
       <div class="row save-row">
-        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">
+        <button class="btn btn-primary" type="button" :disabled="savingTune || !dirty" @click="saveTune">
           {{ savingTune ? '保存中…' : '保存调优' }}
         </button>
         <span class="muted tiny">端口、监听地址与上游地址需改配置文件并重启</span>
@@ -244,7 +237,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         </div>
       </div>
       <div class="row save-row">
-        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">保存模型兼容设置</button>
+        <button class="btn btn-primary" type="button" :disabled="savingTune || !dirty" @click="saveTune">保存模型兼容设置</button>
         <span class="muted tiny">保存后立即应用到新请求，无需重启</span>
       </div>
     </section>
@@ -260,7 +253,7 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
         </label>
       </div>
       <div class="row save-row">
-        <button class="btn btn-primary" type="button" :disabled="savingTune" @click="saveTune">保存模型白名单</button>
+        <button class="btn btn-primary" type="button" :disabled="savingTune || !dirty" @click="saveTune">保存模型白名单</button>
       </div>
     </section>
 
@@ -314,7 +307,8 @@ const curlSample = computed(() => `curl ${baseUrl.value}/chat/completions \\
   font-size: 11.5px; color: var(--dim);
   transition: all var(--dur-1) var(--ease);
 }
-.pick input { display: none; }
+.pick input { accent-color: var(--accent); }
+.pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pick:hover { border-color: var(--line-strong); color: var(--text-2); }
 .pick.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-2); font-weight: 600; }
 

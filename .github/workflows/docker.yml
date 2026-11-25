@@ -40,6 +40,8 @@ jobs:
         working-directory: panel-ui
       - name: Unit tests
         run: npm test
+      - name: Panel state regression tests
+        run: node --test panel-ui/test/*.test.mjs
 
   # amd64 and arm64 are built as separate jobs so neither needs QEMU. Each job
   # pushes by digest, then a tiny job stitches the digests into one multi-arch

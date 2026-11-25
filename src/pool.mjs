@@ -9,12 +9,13 @@ export const MAX_HAG_BODY_BYTES = 4_718_592 // 4.5 MiB; larger requests hang the
 const CLIENT_ID = '6917612679526496902'
 
 export class AccountPool {
-  constructor(config, { fetchImpl = fetch, configPath = null, logger = console, persistConfig = null } = {}) {
+  constructor(config, { fetchImpl = fetch, configPath = null, logger = console, persistConfig = null, persistCredential = null } = {}) {
     this.config = config
     this.fetch = fetchImpl
     this.configPath = configPath
     this.logger = logger
     this.persistConfig = persistConfig
+    this.persistCredential = persistCredential
     this.cursors = { stable: 0, gray: 0 }
     this.renewals = new Map()
     this.stats = {
@@ -185,12 +186,18 @@ export class AccountPool {
     if (!createdResponse.ok || !credential) {
       throw new HttpError(401, `账号 ${account.id} 签票失败（HTTP ${createdResponse.status}）：${created.desc || created.message || '无 credential'}`, 'authentication_error')
     }
-    account.credential = credential
-    account.validTimeSec = created.credentialResult?.validTime || created.data?.validTime || created.validTime ||
-      Math.floor(Date.now() / 1000) + 7 * 86400
-    // New credentials become valid immediately. Atomic write with mode 0600;
-    // if the file backend fails, still keep the renewed value in memory for retry.
-    await this.persist()
+    const renewed = { ...account, credential,
+      validTimeSec: created.credentialResult?.validTime || created.data?.validTime || created.validTime ||
+        Math.floor(Date.now() / 1000) + 7 * 86400 }
+    if (this.persistCredential) {
+      await this.persistCredential(renewed, account.credential)
+      const current = Object.values(this.config.accounts).flat().find((item) => item.id === account.id && item.uid === account.uid)
+      if (!current) throw new HttpError(409, '续期期间账号已移除', 'account_changed')
+      Object.assign(account, current)
+    } else {
+      Object.assign(account, renewed)
+      await this.persist()
+    }
     this.stats.credentialRefreshes++
     this.logger.log(`[credential] renewed account=${account.id}; not writing token values to logs`)
     return account
@@ -210,7 +217,7 @@ export class AccountPool {
    * - 5xx / network: cool briefly, try the next one.
    * The client sees one request; it never learns an account was swapped.
    */
-  async chat(body, route, { signal, configPath = this.configPath, onUsage, onFirstToken, onFirstByte, onError } = {}) {
+  async chat(body, route, { signal, configPath = this.configPath, requestId = `xy-${crypto.randomUUID()}`, onUsage, onFirstToken, onFirstByte, onResponseHeaders, onAttempt, onAccount, onError } = {}) {
     this.configPath = configPath
     const outgoing = normalizeRequestBody({ ...structuredClone(body), stream: true }, {
       kimi: this.config.kimiCompatibility !== false,
@@ -224,6 +231,28 @@ export class AccountPool {
     const attempted = new Set()
     const failures = []
     let lastError = null
+    let sequence = 0
+    const track = async (account, action, operation) => {
+      const index = ++sequence
+      const traceId = action === 'renewal' ? '' : `${requestId}-a${index}`
+      const meta = { index, accountId: account.id, action, status: null, durationMs: null, errorType: '', traceId }
+      const started = Date.now()
+      onAttempt?.({ ...meta })
+      try {
+        const result = await operation(traceId)
+        meta.status = result instanceof Response ? result.status : 200
+        if (meta.status >= 400) meta.errorType = `upstream_http_${meta.status}`
+        return result
+      } catch (error) {
+        const failure = signal?.aborted ? signal.reason : error
+        meta.status = failure?.status || 502
+        meta.errorType = failure?.code || 'upstream_unavailable'
+        throw error
+      } finally {
+        meta.durationMs = Date.now() - started
+        onAttempt?.({ ...meta })
+      }
+    }
 
     for (let attempt = 0; attempt < 6; attempt++) {
       const ordered = this.candidates(route, { exclude: attempted })
@@ -231,20 +260,22 @@ export class AccountPool {
       const account = ordered[0]
       attempted.add(account.id)
       this.record(route, account)
-      const execute = () => this.fetch(this.config.upstreamUrl, {
+      onAccount?.(account.id)
+      const execute = (action = 'chat') => track(account, action, (trace) => this.fetch(this.config.upstreamUrl, {
         method: 'POST',
-        headers: authHeaders(account),
+        headers: authHeaders(account, { trace }),
         body: outgoingText,
         signal,
-      })
+      }))
       let response
       try {
         response = await execute()
         if ([401, 403].includes(response.status) && account.refreshToken) {
           await response.body?.cancel().catch(() => {})
           try {
-            await this.renew(account)
-            response = await execute()
+            await track(account, 'renewal', () => this.renew(account))
+            if (signal?.aborted) throw signal.reason
+            response = await execute('chat-after-renewal')
           } catch (error) {
             lastError = error
           }
@@ -258,19 +289,19 @@ export class AccountPool {
         continue
       }
 
+      if (signal?.aborted) throw signal.reason
       if (response.ok && response.body) {
         this.clearCool(account)
-        this.lastFirstByteAt = Date.now()
-        onFirstByte?.(this.lastFirstByteAt)
+        onResponseHeaders?.()
         this.stats.failovers = (this.stats.failovers || 0) + (attempt > 0 ? 1 : 0)
-        return this.#respond({ response, account, route, pool: route.pool, body, signal, onUsage, onFirstToken, onError })
+        return this.#respond({ response, account, route, pool: route.pool, body, signal, requestId, onUsage, onFirstByte, onFirstToken, onError })
       }
 
       this.stats.upstreamErrors++
       const status = response.status
-      const text = await response.text().catch(() => '')
-      failures.push({ account: account.id, status, reason: text.slice(0, 200) })
-      lastError = new HttpError(status, `小艺Work 上游 HTTP ${status}：${text.slice(0, 1000)}`,
+      await response.body?.cancel().catch(() => {})
+      failures.push({ account: account.id, status })
+      lastError = new HttpError(status, `小艺Work 上游 HTTP ${status}`,
         [401, 403].includes(status) ? 'authentication_error' : 'upstream_error')
 
       if ([401, 403].includes(status)) {
@@ -293,26 +324,28 @@ export class AccountPool {
       : new HttpError(503, `${route.pool} 池没有可用账号，请检查凭据或在面板重新登录${detail}`, 'account_pool_empty')
   }
 
-  #respond({ response, account, route, pool, body, signal, onUsage, onFirstToken, onError }) {
+  #respond({ response, account, route, pool, body, signal, requestId, onUsage, onFirstByte, onFirstToken, onError }) {
     const headers = new Headers({
       'x-xiaoyi-route': route.selected ? 'gray' : 'stable',
       'x-xiaoyi-pool': pool,
       'x-xiaoyi-gray-reason': route.reason,
       'x-xiaoyi-gray-bucket': String(route.bucket),
       'x-xiaoyi-account': account.id,
-      'x-request-id': `xy-${crypto.randomUUID()}`,
+      'x-request-id': requestId,
       'cache-control': 'no-cache, no-transform',
     })
     if (body.stream !== false) {
       headers.set('content-type', 'text/event-stream; charset=utf-8')
       headers.set('x-accel-buffering', 'no')
       return new Response(transformSse(response.body, body.model, {
-        signal, onUsage, onFirstToken, onError, heartbeatMs: this.config.streamHeartbeatMs ?? 15000, fastFail: this.config.upstreamErrorFastFail !== false,
+        signal, onUsage, onFirstByte, onFirstToken, onError, heartbeatMs: this.config.streamHeartbeatMs ?? 15000, fastFail: this.config.upstreamErrorFastFail !== false,
       }), { status: 200, headers })
     }
-    return aggregateSse(response.body, body.model, { signal, onUsage, onFirstToken }).then((result) => {
+    return aggregateSse(response.body, body.model, {
+      signal, onUsage, onFirstByte, onFirstToken, onError, fastFail: this.config.upstreamErrorFastFail !== false,
+    }).then((result) => {
       headers.set('content-type', 'application/json; charset=utf-8')
-      return new Response(JSON.stringify(result), { status: 200, headers })
+      return new Response(JSON.stringify(result), { status: result.error ? 502 : 200, headers })
     })
   }
 

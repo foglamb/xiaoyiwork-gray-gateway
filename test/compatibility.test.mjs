@@ -50,6 +50,7 @@ test('pool normalizes the actual outgoing Kimi request body', async () => {
   const response = await pool.chat({
     model: 'Kimi_K3.1_Pro_VE', messages: [], stream: false, temperature: 0,
     tool_choice: { type: 'function', function: { name: 'x' } },
+    tools: [{ type: 'function', function: { name: 'x', parameters: { type: 'object', properties: {} } } }],
   }, { pool: 'gray', selected: true, reason: 'test', bucket: 0 })
   assert.equal(response.status, 200)
   assert.equal('temperature' in forwarded, false)

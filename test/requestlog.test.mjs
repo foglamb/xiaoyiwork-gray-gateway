@@ -191,9 +191,11 @@ test('72h reads records beyond 24h even after they leave the memory ring', async
   assert.ok(chart.byHour[0].at <= now - 71 * 3600000, '72h chart retains its full time axis')
 })
 
-test('request metrics derive generation throughput and latency percentiles', () => {
+test('request metrics derive generation throughput and latency percentiles', (t) => {
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now)
   const log = new RequestLog({ persist: false })
-  const at = Date.now() - 10000
+  const at = now - 10000
   log.begin({ id: 'throughput', model: 'm', stream: true, route: { selected: true, pool: 'gray', reason: 'test' } })
   log.active.get('throughput').at = at
   log.finish('throughput', {

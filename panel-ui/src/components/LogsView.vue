@@ -1,101 +1,56 @@
 <script setup>
-import { computed, onMounted, shallowRef, watch } from 'vue'
-import { logs, logStats, refreshAll, loadLogs, windowHours, state } from '../composables/useDashboard.js'
+import { computed, onMounted, shallowRef } from 'vue'
+import { state, refreshAll } from '../composables/useDashboard.js'
+import { logQuery, tableData, tableEntries as logs, tableStats as logStats, tableBusy as busy, tableError, loadTableLogs as load, updateLogQuery, resumeLatestLogs } from '../composables/useLogs.js'
+import { latencyStages, stageStyle, logsCsv, measuredOutputTps } from '../lib/logs.js'
 import { api } from '../composables/useApi.js'
 import { notify } from '../composables/useToast.js'
 import AppIcon from './AppIcon.vue'
-import { num, ms, clock, pct, compact, exact, ago, tps } from '../composables/useFormat.js'
+import { num, ms, clock, pct, compact, exact, tps } from '../composables/useFormat.js'
 
 const props = defineProps({ polling: { type: Boolean, default: true } })
 const emit = defineEmits(['update:polling'])
-
-const pageSize = shallowRef(20)
-const page = shallowRef(1)
-const total = shallowRef(0)
-const busy = shallowRef(false)
 const expanded = shallowRef(null)
-
-const pages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
+const search = shallowRef(logQuery.value.q)
+const page = computed(() => logQuery.value.page)
+const pageSize = computed(() => logQuery.value.pageSize)
+const total = computed(() => tableData.value?.total || 0)
+const pages = computed(() => tableData.value?.pages || 1)
 const modelNames = computed(() => Object.fromEntries((state.value?.models || []).map((model) => [model.id, model.name || model.id])))
 const modelName = (id) => modelNames.value[id] || id || '—'
 
-function latencyStages(entry) {
-  const total = Number(entry.ms) || 0
-  const firstByte = Math.max(0, Math.min(total, Number(entry.firstByteMs) || 0))
-  const firstToken = Math.max(firstByte, Math.min(total, Number(entry.ttftMs) || firstByte))
-  return [
-    { key: 'network', label: '接入 / 首字节', value: firstByte },
-    { key: 'prefill', label: '预填充', value: Math.max(0, firstToken - firstByte) },
-    { key: 'generation', label: '生成', value: Math.max(0, total - firstToken) },
-  ]
+function change(patch) {
+  expanded.value = null
+  return updateLogQuery(patch)
 }
-function stageWidth(stage, entry) {
-  const total = Number(entry.ms) || 0
-  if (!total || !stage.value) return 0
-  return Math.max(1.2, (stage.value / total) * 100)
-}
-function csvCell(value) { return `"${String(value ?? '').replaceAll('"', '""')}"` }
+function go(next) { return change({ page: Math.min(pages.value, Math.max(1, next)) }) }
+function latest() { expanded.value = null; return resumeLatestLogs() }
 function exportCsv() {
-  const columns = ['time', 'request_id', 'model', 'route', 'account', 'status', 'total_ms', 'first_byte_ms', 'ttft_ms', 'generation_ms', 'prompt_tokens', 'cached_tokens', 'reasoning_tokens', 'completion_tokens', 'total_tokens', 'prefill_tps', 'output_tps', 'error']
-  const rows = logs.value.map((entry) => [new Date(entry.at).toISOString(), entry.id, entry.model, entry.route, entry.accountId, entry.status, entry.ms, entry.firstByteMs, entry.ttftMs, entry.generationMs, entry.promptTokens, entry.cachedTokens, entry.reasoningTokens, entry.completionTokens, entry.totalTokens, entry.prefillTps, entry.outputTps, entry.error])
-  const csv = '\ufeff' + [columns, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  const url = URL.createObjectURL(new Blob([logsCsv(logs.value)], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
   link.download = `xiaoyi-requests-page-${page.value}-${new Date().toISOString().slice(0, 19).replaceAll(':', '-')}.csv`
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-  notify(`已导出本页 ${rows.length} 条详细指标`, 'ok')
+  notify(`已导出本页 ${logs.value.length} 条详细指标`, 'ok')
 }
-
-async function load() {
-  busy.value = true
-  try {
-    // Follow the shared window so switching ranges on the overview keeps the
-    // numbers consistent when coming back to this page.
-    const data = await loadLogs({ page: page.value, pageSize: pageSize.value, hours: windowHours.value })
-    total.value = data.total || 0
-  } catch (error) {
-    notify(error.message, 'err')
-  } finally {
-    busy.value = false
-  }
-}
-
-function go(next) {
-  const target = Math.min(pages.value, Math.max(1, next))
-  if (target === page.value) return
-  page.value = target
-  load()
-}
-
 async function clearAll() {
   if (!window.confirm('清空全部请求记录？此操作不可恢复。')) return
   try {
     await api('/api/logs/clear', { method: 'POST', body: {} })
-    page.value = 1
-    await refreshAll()
-    await load()
+    await Promise.all([refreshAll(), latest()])
     notify('记录已清空', 'ok')
-  } catch (error) {
-    notify(error.message, 'err')
-  }
+  } catch (error) { notify(error.message, 'err') }
 }
-
 function statusTone(entry) {
   if (entry.status === null || entry.status === undefined) return 'info'
   if (entry.status >= 500) return 'err'
   if (entry.status >= 400) return 'warn'
   return 'ok'
 }
-
 function hitRate(entry) {
-  if (!entry.promptTokens) return null
-  return ((entry.cachedTokens || 0) / entry.promptTokens) * 100
+  return entry.promptTokens ? ((entry.cachedTokens || 0) / entry.promptTokens) * 100 : null
 }
-
-watch(() => logs.value, () => { total.value = Math.max(total.value, logs.value.length) })
-watch(pageSize, () => { page.value = 1; expanded.value = null; load() })
 onMounted(load)
 </script>
 
@@ -103,9 +58,10 @@ onMounted(load)
   <div class="stack">
     <div class="stats">
       <div class="mini card"><span>请求 / 失败</span><b>{{ num(logStats.last24h || 0) }} <small>/ {{ num(logStats.failed24h || 0) }}</small></b></div>
-      <div class="mini card metric-primary"><span>聚合输出速度</span><b>{{ tps(logStats.outputTps) }}</b><em>输出 ÷ 生成时间</em></div>
+      <div class="mini card metric-primary"><span>聚合输出速度</span><b>{{ tps(logStats.outputTps) }}</b><em>输出 ÷ 输出阶段 · {{ num(logStats.outputTpsSamples) }} 个有效样本</em></div>
       <div class="mini card"><span>P50 / P95 耗时</span><b>{{ ms(logStats.p50Ms) }} <small>/ {{ ms(logStats.p95Ms) }}</small></b></div>
-      <div class="mini card"><span>平均首 Token</span><b>{{ ms(logStats.averageFirstTokenMs) }}</b><em>首字节 {{ ms(logStats.averageFirstByteMs) }}</em></div>
+      <div class="mini card"><span>平均首 Token</span><b>{{ ms(logStats.averageFirstTokenMs) }}</b><em>{{ num(logStats.ttftSamples) }} 个有效样本 · 首字节 {{ ms(logStats.averageFirstByteMs) }}</em></div>
+      <div class="mini card"><span>端到端输出速度</span><b>{{ tps(logStats.endToEndTps) }}</b><em>{{ num(logStats.endToEndTpsSamples) }} 个有效样本 · 含等待</em></div>
       <div class="mini card"><span>缓存命中率</span><b class="good">{{ pct(logStats.cacheHitRate) }}</b></div>
       <div class="mini card" :title="`输入 ${exact(logStats.promptTokens24h)} + 输出 ${exact(logStats.completionTokens24h)}`"><span>总 Token</span><b>{{ compact(logStats.tokens24h || 0) }}</b></div>
     </div>
@@ -133,7 +89,22 @@ onMounted(load)
         </div>
       </header>
 
-      <div class="table-wrap">
+      <form class="filters" @submit.prevent="change({ q: search })">
+        <label>时间窗口<select :value="logQuery.hours" @change="change({ hours: Number($event.target.value) })"><option v-for="h in [6, 24, 72]" :key="h" :value="h">近 {{ h }} 小时</option></select></label>
+        <label>模型<select :value="logQuery.model" @change="change({ model: $event.target.value })"><option value="">全部模型</option><option v-if="logQuery.model && !modelNames[logQuery.model]" :value="logQuery.model">{{ logQuery.model }}</option><option v-for="model in state?.models || []" :key="model.id" :value="model.id">{{ model.name || model.id }}</option></select></label>
+        <label>账号<select :value="logQuery.accountId" @change="change({ accountId: $event.target.value })"><option value="">全部账号</option><option v-for="account in state?.accounts || []" :key="account.id" :value="account.id">{{ account.label || account.id }}</option></select></label>
+        <label>结果<select :value="logQuery.status" @change="change({ status: $event.target.value })"><option value="all">全部</option><option value="success">成功</option><option value="error">失败</option></select></label>
+        <label>排序<select :value="logQuery.sort" @change="change({ sort: $event.target.value })"><option value="at">时间</option><option value="ms">耗时</option><option value="outputTps">输出速度</option><option value="totalTokens">总 Token</option></select></label>
+        <label>方向<select :value="logQuery.order" @change="change({ order: $event.target.value })"><option value="desc">降序</option><option value="asc">升序</option></select></label>
+        <label class="search-field">搜索<input v-model="search" type="search" placeholder="请求 / 模型 / 账号 / 错误" /></label><button class="btn btn-sm" type="submit">搜索</button>
+      </form>
+      <div class="query-note muted tiny">
+        <span v-if="logQuery.until">历史快照截至 {{ new Date(logQuery.until).toLocaleString('zh-CN') }} · 翻页、筛选与刷新保持快照</span><span v-else>最新记录 · 翻页时固定快照</span>
+        <button v-if="logQuery.until" class="btn btn-sm" type="button" @click="latest">恢复最新</button>
+        <span>统计与表格使用相同筛选条件</span>
+      </div>
+      <p v-if="tableError" class="query-note err-text" role="alert">{{ tableError }} · 请刷新重试</p>
+      <div class="table-wrap" :aria-busy="busy">
         <table>
           <thead>
             <tr>
@@ -161,7 +132,7 @@ onMounted(load)
                 <td class="right num">{{ num(entry.promptTokens) }}</td>
                 <td class="right num" :class="{ good: (hitRate(entry) || 0) >= 50 }">{{ hitRate(entry) === null ? '—' : pct(hitRate(entry)) }}</td>
                 <td class="right num">{{ num(entry.completionTokens) }}</td>
-                <td class="right speed-cell" :title="entry.generationMs ? `生成 ${ms(entry.generationMs)}` : ''">{{ tps(entry.outputTps) }}</td>
+                <td class="right speed-cell" :title="entry.generationMs ? `生成 ${ms(entry.generationMs)}` : ''">{{ tps(measuredOutputTps(entry)) }}</td>
               </tr>
               <tr v-if="expanded === entry.id" class="detail-row">
                 <td colspan="10">
@@ -173,48 +144,66 @@ onMounted(load)
                       <span><small>模式</small><code>{{ entry.stream ? '流式' : '非流式' }}</code></span>
                     </div>
                     <div class="waterfall">
-                      <div class="section-label"><span>请求时间瀑布</span><b>{{ ms(entry.ms) }}</b></div>
+                      <div class="section-label"><span>请求阶段（未知显示 —；等待包含排队、传输等，非精确预填充）</span><b>{{ ms(entry.ms) }}</b></div>
                       <div class="waterfall-track" aria-label="请求耗时分布">
-                        <i v-for="stage in latencyStages(entry)" :key="stage.key" :class="stage.key" :style="{ width: `${stageWidth(stage, entry)}%` }" />
+                        <i v-for="stage in latencyStages(entry)" :key="stage.key" :class="stage.key" :style="stageStyle(stage, entry)" />
                       </div>
                       <div class="waterfall-legend">
                         <span v-for="stage in latencyStages(entry)" :key="stage.key"><i :class="stage.key" />{{ stage.label }} <b>{{ ms(stage.value) }}</b></span>
                       </div>
                     </div>
                     <div class="detail">
-                      <div class="detail-item"><span>首字节 / 首 Token</span><code>{{ ms(entry.firstByteMs) }} / {{ ms(entry.ttftMs) }}</code></div>
-                      <div class="detail-item"><span>生成耗时</span><code>{{ ms(entry.generationMs) }}</code></div>
-                      <div class="detail-item"><span>输入等效 / 输出速度</span><code>{{ tps(entry.prefillTps) }} / {{ tps(entry.outputTps) }}</code></div>
+                      <div class="detail-item"><span>响应头等待</span><code>{{ ms(entry.responseHeadersMs) }}</code></div>
+                      <div class="detail-item"><span>响应体首字节 / 首 Token</span><code>{{ ms(entry.firstByteMeaning === 'body_byte' ? entry.firstByteMs : null) }} / {{ ms(entry.ttftMs) }}</code></div>
+                      <div v-if="entry.firstByteMeaning === 'historical_response_headers'" class="detail-item"><span>历史响应头计时（旧 firstByteMs）</span><code>{{ ms(entry.firstByteMs) }}</code></div>
+                      <div class="detail-item"><span>输出阶段耗时</span><code>{{ ms(entry.generationMs) }}</code></div>
+                      <div class="detail-item"><span>输入等效（非实测预填充） / 输出速度</span><code>{{ tps(entry.prefillTps) }} / {{ tps(measuredOutputTps(entry)) }}</code></div>
+                      <div class="detail-item"><span>端到端输出速度</span><code>{{ tps(entry.endToEndTps) }}</code></div>
+                      <div class="detail-item"><span>错误类型</span><code>{{ entry.errorType || '—' }}</code></div>
                       <div class="detail-item"><span>输入 Token</span><code>{{ num(entry.promptTokens) }}</code></div>
                       <div class="detail-item"><span>未命中 / 缓存</span><code>{{ num(Math.max(0, (entry.promptTokens || 0) - (entry.cachedTokens || 0))) }} / {{ num(entry.cachedTokens) }}</code></div>
                       <div class="detail-item"><span>输出 / 推理</span><code>{{ num(entry.completionTokens) }} / {{ num(entry.reasoningTokens) }}</code></div>
                       <div class="detail-item"><span>总 Token</span><code>{{ num(entry.totalTokens) }}</code></div>
                       <div v-if="entry.error" class="detail-item wide"><span>错误</span><code class="err-text">{{ entry.error }}</code></div>
                     </div>
+                    <div class="attempts">
+                      <h4>重试 / 续期尝试链</h4>
+                      <ol v-if="entry.attempts?.length">
+                        <li v-for="(attempt, index) in entry.attempts" :key="`${attempt.index}-${index}`">
+                          <b>#{{ attempt.index ?? index + 1 }} · {{ attempt.action || '—' }}</b>
+                          <span>账号 <code>{{ attempt.accountId || '—' }}</code></span>
+                          <span>状态 {{ attempt.status ?? '—' }} · {{ ms(attempt.durationMs) }}</span>
+                          <span>错误类型 <code>{{ attempt.errorType || '—' }}</code></span>
+                          <span>Trace <code>{{ attempt.traceId || '—' }}</code></span>
+                        </li>
+                      </ol>
+                      <p v-else class="muted tiny">— 暂无尝试链数据</p>
+                    </div>
                   </div>
                 </td>
               </tr>
             </template>
-            <tr v-if="!logs.length"><td colspan="10" class="empty-state">还没有请求记录</td></tr>
+            <tr v-if="!logs.length"><td colspan="10" class="empty-state">{{ busy ? '正在加载…' : tableError ? '查询失败，请重试' : '当前条件没有请求记录' }}</td></tr>
           </tbody>
         </table>
       </div>
 
       <footer class="pager">
         <label class="page-size">每页
-          <select v-model.number="pageSize" aria-label="每页条数">
+          <select :value="pageSize" @change="change({ pageSize: Number($event.target.value) })" aria-label="每页条数">
             <option :value="10">10</option><option :value="20">20</option>
             <option :value="50">50</option><option :value="100">100</option>
           </select>
           条
         </label>
-        <span class="muted tiny">第 {{ page }} / {{ pages }} 页 · 共 {{ num(total) }} 条</span>
+        <span v-if="tableData" class="muted tiny">第 {{ page }} / {{ pages }} 页 · 共 {{ num(total) }} 条</span>
+        <span v-else class="muted tiny">{{ busy ? '查询中…' : '暂无查询结果' }}</span>
         <div class="row">
-          <button class="btn btn-sm btn-icon" type="button" title="首页" :disabled="page <= 1" @click="go(1)"><AppIcon name="chevronsLeft" :size="13" /></button>
-          <button class="btn btn-sm btn-icon" type="button" title="上一页" :disabled="page <= 1" @click="go(page - 1)"><AppIcon name="chevronLeft" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="首页" :disabled="busy || !tableData || page <= 1" @click="go(1)"><AppIcon name="chevronsLeft" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="上一页" :disabled="busy || !tableData || page <= 1" @click="go(page - 1)"><AppIcon name="chevronLeft" :size="13" /></button>
           <span class="page-now">{{ page }}</span>
-          <button class="btn btn-sm btn-icon" type="button" title="下一页" :disabled="page >= pages" @click="go(page + 1)"><AppIcon name="chevronRight" :size="13" /></button>
-          <button class="btn btn-sm btn-icon" type="button" title="末页" :disabled="page >= pages" @click="go(pages)"><AppIcon name="chevronsRight" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="下一页" :disabled="busy || !tableData || page >= pages" @click="go(page + 1)"><AppIcon name="chevronRight" :size="13" /></button>
+          <button class="btn btn-sm btn-icon" type="button" title="末页" :disabled="busy || !tableData || page >= pages" @click="go(pages)"><AppIcon name="chevronsRight" :size="13" /></button>
         </div>
       </footer>
     </div>
@@ -222,6 +211,14 @@ onMounted(load)
 </template>
 
 <style scoped>
+.filters { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 0 19px 12px; }
+.filters label { display: flex; flex-direction: column; gap: 5px; color: var(--dim); font-size: 10px; }
+.filters select, .filters input { min-height: 32px; max-width: 210px; padding: 5px 8px; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-xs); }
+.query-note { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 0 19px 12px; }
+.attempts { margin-top: 14px; }
+.attempts h4 { margin-bottom: 8px; font-size: 11px; }
+.attempts ol { list-style: none; padding: 0; }
+.attempts li { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 6px; padding: 10px; border: 1px solid var(--line-soft); font-size: 10px; overflow-wrap: anywhere; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; }
 .mini { min-width: 0; padding: 13px 14px; display: flex; flex-direction: column; gap: 3px; border-radius: var(--r-md); }
@@ -261,8 +258,8 @@ th:last-child, td:last-child { padding-right: 19px; }
 .waterfall { margin-top: 14px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); }
 .section-label { display: flex; justify-content: space-between; gap: 12px; color: var(--dim); font-size: 10px; }
 .section-label b { color: var(--text-2); font-family: var(--font-mono); }
-.waterfall-track { display: flex; width: 100%; height: 10px; margin-top: 10px; overflow: hidden; border-radius: 6px; background: var(--surface-2); }
-.waterfall-track i { height: 100%; min-width: 0; }
+.waterfall-track { position: relative; display: flex; width: 100%; height: 10px; margin-top: 10px; overflow: hidden; border-radius: 6px; background: var(--surface-2); }
+.waterfall-track i { position: absolute; height: 100%; min-width: 0; }
 .network { background: var(--blue); }
 .prefill { background: var(--amber); }
 .generation { background: var(--green); }

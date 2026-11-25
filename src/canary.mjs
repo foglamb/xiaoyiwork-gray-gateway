@@ -157,6 +157,15 @@ export function validateConfig(input) {
   for (const key of ['kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail']) {
     if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new HttpError(400, `${key} 必须是布尔值`)
   }
+  for (const [key, upper] of [['accountProbeMinutes', 1440], ['modelCatalogMinutes', 1440], ['streamHeartbeatMs', 3600000]]) {
+    if (input[key] !== undefined && (!Number.isInteger(input[key]) || input[key] < 0 || input[key] > upper)) {
+      throw new HttpError(400, `${key} 必须在 0–${upper} 之间（整数）`)
+    }
+  }
+  if (input.logMaxEntries !== undefined) {
+    if (!Number.isInteger(input.logMaxEntries)) throw new HttpError(400, 'logMaxEntries 必须为整数')
+    input.logMaxEntries = Math.max(50, Math.min(input.logMaxEntries, 5000))
+  }
   if (input.modelCatalogMinutes !== undefined && (!Number.isFinite(input.modelCatalogMinutes) || input.modelCatalogMinutes < 0)) {
     throw new HttpError(400, 'modelCatalogMinutes 必须是非负数字')
   }

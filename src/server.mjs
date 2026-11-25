@@ -53,8 +53,8 @@ async function readJsonBody(request, maxBytes) {
   }
 }
 
-function runtimeFrom(config, configPath, fetchImpl, persistConfig) {
-  const pool = new AccountPool(config, { fetchImpl, configPath, persistConfig })
+function runtimeFrom(config, configPath, fetchImpl, persistConfig, persistCredential, logger) {
+  const pool = new AccountPool(config, { fetchImpl, configPath, persistConfig, persistCredential, logger })
   return { config, pool }
 }
 
@@ -71,7 +71,7 @@ export function createProxyServer(config, {
     await rename(temporary, configPath)
   },
 } = {}) {
-  let runtime = runtimeFrom(config, configPath, fetchImpl, persistConfig)
+  let runtime = runtimeFrom(config, configPath, fetchImpl, persistConfig, persistCredential, logger)
   const requestLog = new RequestLog({ configPath, persist: Boolean(configPath), maxEntries: config.logMaxEntries || 1000 })
   const modelCatalog = new ModelCatalog({ fetchImpl, logger, configPath })
   const observedModels = new Set(requestLog.modelIds())
@@ -166,63 +166,90 @@ export function createProxyServer(config, {
   let updateChain = Promise.resolve()
 
   function installRuntime(candidate) {
-    const previous = runtime.pool
-    runtime = runtimeFrom(candidate, configPath, fetchImpl, persistConfig)
-    runtime.pool.stats = previous.stats
+    // Keep the active pool object so in-flight calls, round-robin positions,
+    // renewal locks and cooldown/health state survive unrelated config changes.
+    const before = new Map(Object.values(runtime.config.accounts).flat().map((a) => [a.id, a]))
+    const after = new Map(Object.values(candidate.accounts).flat().map((a) => [a.id, a]))
+    for (const [id, previous] of before) {
+      const next = after.get(id)
+      if (!next || next.credential !== previous.credential || next.deviceId !== previous.deviceId) {
+        runtime.pool.cooldownUntil.delete(id)
+        runtime.pool.health.delete(id)
+        quotaCache.delete(id)
+        quotaError.delete(id)
+      }
+    }
+    const probeChanged = (runtime.config.accountProbeMinutes ?? 0) !== (candidate.accountProbeMinutes ?? 0)
+    const catalogChanged = (runtime.config.modelCatalogMinutes ?? 15) !== (candidate.modelCatalogMinutes ?? 15)
+    runtime.config = candidate
+    runtime.pool.config = candidate
+    if (probeChanged) startProbing()
+    if (catalogChanged) startModelCatalogRefresh()
   }
 
-  async function persistRuntimeConfig(candidate) {
-    const update = updateChain.then(() => persistConfig(candidate))
+  function persistRuntimeConfig(mutate) {
+    const update = updateChain.then(async () => {
+      const candidate = structuredClone(runtime.config)
+      const result = mutate(candidate)
+      validateConfig(candidate)
+      await persistConfig(candidate)
+      installRuntime(candidate)
+      return result
+    })
     updateChain = update.catch(() => {})
-    await update
-    installRuntime(candidate)
+    return update
+  }
+
+  function persistCredential(account, previousCredential) {
+    return persistRuntimeConfig((candidate) => {
+      const saved = Object.values(candidate.accounts).flat().find((a) => a.id === account.id && a.uid === account.uid)
+      // A login or delete that overtook an old renewal must not be overwritten.
+      if (!saved || saved.credential !== previousCredential) return
+      saved.credential = account.credential
+      saved.validTimeSec = account.validTimeSec
+    })
   }
 
   async function addAccount(input) {
     if (!['stable', 'gray'].includes(input.pool)) throw new HttpError(400, 'pool 必须为 stable 或 gray')
     const account = normalizeAccountInput(input)
-    const candidate = structuredClone(runtime.config)
-    const accounts = candidate.accounts[input.pool]
-    const sameUidIndex = input.allowDuplicate === true ? -1 : accounts.findIndex((item) => item.uid === account.uid)
-    let replaced = false
-    let savedId = account.id
+    return persistRuntimeConfig((candidate) => {
+      const accounts = candidate.accounts[input.pool]
+      const sameUidIndex = input.allowDuplicate === true ? -1 : accounts.findIndex((item) => item.uid === account.uid)
+      let replaced = false
+      let savedId = account.id
 
-    if (sameUidIndex >= 0) {
-      // Re-login/import for the same uid is a credential replacement, not a
-      // duplicate-account error. Keep the stable id so logs and quota caches
-      // remain associated with the same account.
-      const existing = accounts[sameUidIndex]
-      savedId = existing.id
-      accounts[sameUidIndex] = { ...existing, ...account, id: existing.id }
-      replaced = true
-    } else {
-      if (accounts.some((item) => item.id === account.id)) {
-        throw new HttpError(409, `账号 ID ${account.id} 已属于另一个 UID`, 'account_id_conflict')
+      if (sameUidIndex >= 0) {
+        // Re-login/import for the same uid is a credential replacement, not a
+        // duplicate-account error. Keep the stable id so logs and quota caches
+        // remain associated with the same account.
+        const existing = accounts[sameUidIndex]
+        savedId = existing.id
+        accounts[sameUidIndex] = { ...existing, ...account, id: existing.id }
+        replaced = true
+      } else {
+        if (accounts.some((item) => item.id === account.id)) {
+          throw new HttpError(409, `账号 ID ${account.id} 已属于另一个 UID`, 'account_id_conflict')
+        }
+        const sameUidOtherPool = Object.entries(candidate.accounts)
+          .filter(([pool]) => pool !== input.pool)
+          .flatMap(([, list]) => list)
+          .find((item) => item.uid === account.uid)
+        if (sameUidOtherPool && input.allowDuplicate !== true) {
+          throw new HttpError(409, `UID ${account.uid} 已配置为 ${sameUidOtherPool.id}；如需跨池移动请先删除旧账号`, 'duplicate_uid')
+        }
+        accounts.push(account)
       }
-      const sameUidOtherPool = Object.entries(candidate.accounts)
-        .filter(([pool]) => pool !== input.pool)
-        .flatMap(([, list]) => list)
-        .find((item) => item.uid === account.uid)
-      if (sameUidOtherPool && input.allowDuplicate !== true) {
-        throw new HttpError(409, `UID ${account.uid} 已配置为 ${sameUidOtherPool.id}；如需跨池移动请先删除旧账号`, 'duplicate_uid')
-      }
-      accounts.push(account)
-    }
 
-    validateConfig(candidate)
-    await persistRuntimeConfig(candidate)
-    if (replaced) {
-      quotaCache.delete(savedId)
-      quotaError.delete(savedId)
-    }
-    return {
-      id: savedId,
-      uid: account.uid,
-      pool: input.pool,
-      replaced,
-      hasRefreshToken: Boolean(account.refreshToken),
-      source: account.source || 'manual',
-    }
+      return {
+        id: savedId,
+        uid: account.uid,
+        pool: input.pool,
+        replaced,
+        hasRefreshToken: Boolean(account.refreshToken),
+        source: account.source || 'manual',
+      }
+    })
   }
 
   async function handle(request, response) {
@@ -325,11 +352,10 @@ export function createProxyServer(config, {
     }
     if (request.method === 'POST' && url.pathname === '/api/keys') {
       const patch = await readJsonBody(request, 16384)
-      const candidate = structuredClone(runtime.config)
-      if (patch.apiKey !== undefined) candidate.apiKey = patch.apiKey
-      if (patch.adminKey !== undefined) candidate.adminKey = patch.adminKey
-      validateConfig(candidate)
-      await persistRuntimeConfig(candidate)
+      await persistRuntimeConfig((candidate) => {
+        if (patch.apiKey !== undefined) candidate.apiKey = patch.apiKey
+        if (patch.adminKey !== undefined) candidate.adminKey = patch.adminKey
+      })
       sendJson(response, 200, { apiKey: runtime.config.apiKey, adminKey: runtime.config.adminKey })
       return
     }
@@ -387,15 +413,15 @@ export function createProxyServer(config, {
     }
     if (request.method === 'DELETE' && url.pathname.startsWith('/api/accounts/')) {
       const id = decodeURIComponent(url.pathname.slice('/api/accounts/'.length))
-      const candidate = structuredClone(runtime.config)
-      const pool = Object.keys(candidate.accounts).find((key) => candidate.accounts[key].some((account) => account.id === id))
-      if (!pool) throw new HttpError(404, '账号不存在', 'account_not_found')
-      if (candidate.accounts[pool].length === 1) {
-        const input = await readJsonBody(request, 1024)
-        if (input.force !== true) throw new HttpError(409, '这是当前唯一账号。停用后反代将没有可用账号；确认后可在删除请求传 force=true', 'last_account')
-      }
-      candidate.accounts[pool] = candidate.accounts[pool].filter((account) => account.id !== id)
-      await persistRuntimeConfig(candidate)
+      const input = await readJsonBody(request, 1024)
+      await persistRuntimeConfig((candidate) => {
+        const pool = Object.keys(candidate.accounts).find((key) => candidate.accounts[key].some((account) => account.id === id))
+        if (!pool) throw new HttpError(404, '账号不存在', 'account_not_found')
+        if (candidate.accounts[pool].length === 1 && input.force !== true) {
+          throw new HttpError(409, '这是当前唯一账号。确认后可传 force=true', 'last_account')
+        }
+        candidate.accounts[pool] = candidate.accounts[pool].filter((account) => account.id !== id)
+      })
       quotaCache.delete(id)
       sendJson(response, 200, { ok: true, id })
       return
@@ -436,14 +462,7 @@ export function createProxyServer(config, {
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/logs') {
-      const page = requestLog.page({ page: url.searchParams.get('page'), pageSize: url.searchParams.get('pageSize') })
-      const hours = url.searchParams.get('hours')
-      sendJson(response, 200, {
-        ...page,
-        stats: requestLog.stats(hours),
-        breakdown: requestLog.breakdown(hours),
-        windowHours: Math.max(1, Math.min(Number(hours) || 24, 168)),
-      })
+      sendJson(response, 200, requestLog.query(Object.fromEntries(url.searchParams)))
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/logs/clear') {
@@ -453,36 +472,41 @@ export function createProxyServer(config, {
     }
     if (request.method === 'POST' && url.pathname === '/api/settings') {
       const input = await readJsonBody(request, 16384)
-      const candidate = structuredClone(runtime.config)
-      // Runtime-tunable keys. Port/listen/upstream need a restart, so they stay out.
-      for (const key of ['requestTimeoutMs', 'maxBodyBytes', 'allowPanelFromLan']) {
-        if (input[key] !== undefined) candidate[key] = input[key]
+      if (input.grayModelIds !== undefined && input.grayModels === undefined) input.grayModels = input.grayModelIds
+      delete input.grayModelIds
+      const allowed = new Set(['requestTimeoutMs', 'maxBodyBytes', 'allowPanelFromLan', 'accountProbeMinutes',
+        'streamHeartbeatMs', 'logMaxEntries', 'modelCatalogMinutes', 'upstreamBodyLimitBytes',
+        'kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail', 'grayModels'])
+      for (const key of Object.keys(input)) {
+        if (!allowed.has(key)) throw new HttpError(400, `未知设置字段 ${key}`, 'invalid_config_patch')
       }
-      for (const key of ['accountProbeMinutes', 'streamHeartbeatMs', 'logMaxEntries', 'modelCatalogMinutes', 'upstreamBodyLimitBytes']) {
-        if (input[key] !== undefined) {
-          const value = Number(input[key])
-          if (!Number.isFinite(value) || value < 0) throw new HttpError(400, `${key} 必须是非负数字`, 'invalid_config_patch')
-          candidate[key] = value
+      await persistRuntimeConfig((candidate) => {
+        // Runtime-tunable keys. Port/listen/upstream need a restart, so they stay out.
+        for (const key of ['requestTimeoutMs', 'maxBodyBytes', 'allowPanelFromLan']) {
+          if (input[key] !== undefined) candidate[key] = input[key]
         }
-      }
-      for (const key of ['kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail']) {
-        if (input[key] !== undefined) {
-          if (typeof input[key] !== 'boolean') throw new HttpError(400, `${key} 必须是布尔值`, 'invalid_config_patch')
-          candidate[key] = input[key]
+        for (const key of ['accountProbeMinutes', 'streamHeartbeatMs', 'logMaxEntries', 'modelCatalogMinutes', 'upstreamBodyLimitBytes']) {
+          if (input[key] !== undefined) {
+            const value = Number(input[key])
+            if (!Number.isFinite(value) || value < 0) throw new HttpError(400, `${key} 必须是非负数字`, 'invalid_config_patch')
+            candidate[key] = value
+          }
         }
-      }
-      if (input.grayModels !== undefined) {
-        if (!Array.isArray(input.grayModels) || input.grayModels.some((v) => typeof v !== 'string')) {
-          throw new HttpError(400, 'grayModels 必须是字符串数组', 'invalid_config_patch')
+        for (const key of ['kimiCompatibility', 'normalizeToolSchemas', 'upstreamErrorFastFail']) {
+          if (input[key] !== undefined) {
+            if (typeof input[key] !== 'boolean') throw new HttpError(400, `${key} 必须是布尔值`, 'invalid_config_patch')
+            candidate[key] = input[key]
+          }
         }
-        candidate.grayModels = input.grayModels
-      }
-      validateConfig(candidate)
-      await persistRuntimeConfig(candidate)
-      installRuntime(candidate)
+        if (input.grayModels !== undefined) {
+          if (!Array.isArray(input.grayModels) || input.grayModels.some((v) => typeof v !== 'string')) {
+            throw new HttpError(400, 'grayModels 必须是字符串数组', 'invalid_config_patch')
+          }
+          candidate.grayModels = input.grayModels
+        }
+      })
+      const candidate = runtime.config
       requestLog.setMaxEntries(candidate.logMaxEntries ?? 1000)
-      startProbing()
-      startModelCatalogRefresh()
       sendJson(response, 200, {
         ok: true,
         requestTimeoutMs: candidate.requestTimeoutMs,
@@ -514,18 +538,13 @@ export function createProxyServer(config, {
       const patch = await readJsonBody(request, Math.min(runtime.config.maxBodyBytes, 64 * 1024))
       const allowed = ['enabled', 'percentage', 'salt', 'allowHeaderOverride', 'allowCookieOverride', 'allowlist', 'denylist', 'pool', 'models', 'shadow', 'allowGrayModels']
       for (const key of Object.keys(patch)) if (!allowed.includes(key)) throw new HttpError(400, `不允许热更新字段 ${key}`, 'invalid_config_patch')
-      const candidate = structuredClone(runtime.config)
-      Object.assign(candidate.gray, patch)
-      delete candidate.gray.allowGrayModels
-      if (patch.percentage !== undefined) candidate.gray.percentage = Number(patch.percentage)
-      if (patch.allowGrayModels !== undefined) candidate.allowGrayModels = patch.allowGrayModels
-      validateConfig(candidate)
-      // Serialize updates and install the new config only after its durable write succeeds.
-      // A failed update must not poison the queue for subsequent valid updates.
-      const update = updateChain.then(() => persistConfig(candidate))
-      updateChain = update.catch(() => {})
-      await update
-      installRuntime(candidate)
+      await persistRuntimeConfig((candidate) => {
+        Object.assign(candidate.gray, patch)
+        delete candidate.gray.allowGrayModels
+        if (patch.percentage !== undefined) candidate.gray.percentage = Number(patch.percentage)
+        if (patch.allowGrayModels !== undefined) candidate.allowGrayModels = patch.allowGrayModels
+      })
+      const candidate = runtime.config
       logger.log(`[canary] enabled=${candidate.gray.enabled} percentage=${candidate.gray.percentage} pool=${candidate.gray.pool}`)
       sendJson(response, 200, publicConfig(runtime.config, runtime.pool.stats))
       return
@@ -567,48 +586,69 @@ export function createProxyServer(config, {
       const route = routeGray(request, runtime.config, body)
       requestLog.begin({ id: requestId, model: body.model, stream: body.stream !== false, route })
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(new Error('上游请求超时')), runtime.config.requestTimeoutMs)
+      const timeout = setTimeout(() => controller.abort(new HttpError(504, '上游请求超时', 'upstream_timeout')), runtime.config.requestTimeoutMs)
       timeout.unref?.()
-      response.once('close', () => {
-        if (!response.writableEnded) {
-          requestLog.finish(requestId, { status: 499, error: '客户端断开' })
-          controller.abort(new Error('客户端断开连接'))
+      const disconnected = () => {
+        if (!response.writableEnded && !controller.signal.aborted) {
+          controller.abort(new HttpError(499, '客户端断开', 'client_cancelled'))
         }
-      })
+      }
+      response.once('close', disconnected)
       let usage
       let accountId = ''
       let upstreamError = null
+      let firstByteAt = 0
+      let responseHeadersAt = 0
+      let firstTokenAt = 0
+      const attempts = new Map()
+      const finishLog = (status, error = '', errorType = '') => {
+        recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
+        requestLog.finish(requestId, {
+          status, accountId, usage, rate: 0, error, errorType,
+          attempts: [...attempts.values()],
+          marks: { responseHeadersAt: responseHeadersAt || null, firstByteAt: firstByteAt || null, firstTokenAt: firstTokenAt || null },
+        })
+      }
       try {
-        let firstByteAt = 0
-        let firstTokenAt = 0
         const upstreamResponse = await runtime.pool.chat(body, route, {
-          signal: controller.signal,
-          configPath,
+          signal: controller.signal, configPath, requestId,
           onUsage: (value) => { usage = value },
+          onAccount: (id) => { accountId = id },
+          onAttempt: (attempt) => { attempts.set(attempt.index, attempt) },
+          onResponseHeaders: () => { if (!responseHeadersAt) responseHeadersAt = Date.now() },
           onFirstByte: () => { if (!firstByteAt) firstByteAt = Date.now() },
           onFirstToken: () => { if (!firstTokenAt) firstTokenAt = Date.now() },
           onError: (error) => { upstreamError = error },
         })
-        accountId = upstreamResponse.headers.get('x-xiaoyi-account') || ''
+        if (controller.signal.aborted) throw controller.signal.reason
+        accountId = upstreamResponse.headers.get('x-xiaoyi-account') || accountId
         response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers))
         if (upstreamResponse.body) {
           for await (const chunk of upstreamResponse.body) {
-            if (!response.write(chunk)) await new Promise((resolveDrain) => response.once('drain', resolveDrain))
+            if (controller.signal.aborted) throw controller.signal.reason
+            if (!response.write(chunk)) await new Promise((resolveDrain, rejectDrain) => {
+              const cleanup = () => {
+                response.off('drain', drained)
+                controller.signal.removeEventListener('abort', aborted)
+              }
+              const drained = () => { cleanup(); resolveDrain() }
+              const aborted = () => { cleanup(); rejectDrain(controller.signal.reason) }
+              response.once('drain', drained)
+              controller.signal.addEventListener('abort', aborted, { once: true })
+              if (controller.signal.aborted) aborted()
+            })
           }
         }
+        if (controller.signal.aborted) throw controller.signal.reason
         response.end()
-        recordUsage({ model: body.model, route: route.selected ? 'gray' : 'stable', usage })
-        requestLog.finish(requestId, {
-          status: upstreamError ? 502 : upstreamResponse.status,
-          accountId, usage, rate: 0,
-          error: upstreamError?.message || undefined,
-          marks: { firstByteAt: firstByteAt || null, firstTokenAt: firstTokenAt || null },
-        })
+        finishLog(upstreamError ? 502 : upstreamResponse.status, upstreamError?.message || '', upstreamError?.type || '')
       } catch (error) {
-        requestLog.finish(requestId, { status: error.status || (controller.signal.aborted ? 499 : 500), error: controller.signal.aborted && !response.writableEnded ? '客户端断开' : error.message })
-        throw error
+        const failure = controller.signal.aborted ? controller.signal.reason : error
+        finishLog(failure.status || 502, failure.message || '上游请求失败', failure.code || 'upstream_error')
+        throw failure
       } finally {
         clearTimeout(timeout)
+        response.off('close', disconnected)
       }
       return
     }

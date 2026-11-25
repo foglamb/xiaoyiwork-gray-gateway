@@ -1,3 +1,5 @@
+import { HttpError } from './canary.mjs'
+
 // Schema/request compatibility adapted from the MIT-licensed reference:
 // https://github.com/xuediner-source/magpie-xiaoyiwork-auth
 // Keep local cycle/depth budgets and preserve non-Kimi request semantics.
@@ -359,6 +361,13 @@ export function normalizeRequestBody(bodyObj, { kimi = true, schemas = true } = 
       delete bodyObj.temperature
     }
     if (typeof bodyObj.tool_choice === 'object' && bodyObj.tool_choice !== null) {
+      const name = bodyObj.tool_choice.function?.name
+      const selected = Array.isArray(bodyObj.tools)
+        ? bodyObj.tools.filter((tool) => tool.type === 'function' && tool.function?.name === name) : []
+      if (bodyObj.tool_choice.type !== 'function' || typeof name !== 'string' || !name || selected.length !== 1) {
+        throw new HttpError(400, '具名 tool_choice 必须对应 tools 中唯一的函数', 'invalid_tool_choice')
+      }
+      bodyObj.tools = selected
       bodyObj.tool_choice = 'required'
     }
   }

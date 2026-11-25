@@ -1,395 +1,416 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 export class RequestLog {
   constructor({ configPath = null, maxEntries = 1000, persist = true, segmentBytes = 4 * 1024 * 1024 } = {}) {
     this.dir = configPath ? resolve(dirname(configPath)) : null
-    this.path = configPath ? resolve(dirname(configPath), 'requests.jsonl') : null
-    // Hard cap: the in-memory ring buffer and the on-disk file both stay bounded.
-    this.maxEntries = Math.max(50, Math.min(Number(maxEntries) || 1000, 5000))
-    // Segments are append-only; a full segment is rotated instead of rewritten.
-    this.segmentBytes = Math.max(256 * 1024, Math.min(Number(segmentBytes) || 4 * 1024 * 1024, 64 * 1024 * 1024))
+    this.path = this.dir ? resolve(this.dir, 'requests.jsonl') : null
+    this.maxEntries = clampInteger(maxEntries, 1000, 50, 5000)
+    this.segmentBytes = clampInteger(segmentBytes, 4 * 1024 * 1024, 256 * 1024, 64 * 1024 * 1024)
     this.pageSize = 100
     this.persist = persist && Boolean(this.path)
     this.entries = []
     this.active = new Map()
     this.onFlush = null
     this.segment = 0
+    this.needsSeparator = false
     if (this.persist) this.#load()
   }
 
   setMaxEntries(value) {
-    this.maxEntries = Math.max(50, Math.min(Number(value) || 1000, 5000))
-    if (this.entries.length > this.maxEntries) this.entries = this.entries.slice(-this.maxEntries)
+    this.maxEntries = clampInteger(value, 1000, 50, 5000)
+    this.entries = this.entries.slice(-this.maxEntries)
     return this.maxEntries
   }
 
-  #segmentPath(index) {
-    return index === 0 ? this.path : `${this.path}.${index}`
+  // Validate the resolved absolute target and reject symlinks before file mutation.
+  #logPath(name) {
+    if (!/^requests\.jsonl(?:\.[1-9]\d*)?$/.test(name)) throw new Error('Invalid request log filename')
+    const target = resolve(this.dir, name)
+    if (dirname(target) !== this.dir) throw new Error('Request log outside configured directory')
+    try {
+      if (!lstatSync(target).isFile()) throw new Error('Request log must be a regular file')
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    return target
+  }
+
+  #files() {
+    if (!this.dir) return []
+    try {
+      return readdirSync(this.dir).filter((name) => /^requests\.jsonl(?:\.[1-9]\d*)?$/.test(name))
+        .flatMap((name) => {
+          try {
+            const path = this.#logPath(name)
+            return [{ name, path, index: name === 'requests.jsonl' ? Infinity : Number(name.slice(15)) }]
+          } catch { return [] }
+        }).sort((a, b) => a.index - b.index)
+    } catch { return [] }
   }
 
   #load() {
-    try {
-      // Newest segment wins; earlier segments only fill the tail of the ring buffer.
-      let index = 0
-      while (existsSync(this.#segmentPath(index + 1))) index++
-      this.segment = index
-      const lines = readFileSync(this.#segmentPath(index), 'utf8').split('\n').filter(Boolean)
-      let parsed = lines.slice(-this.maxEntries)
-        .map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
-      // Top up from the previous segment when the current one is short.
-      if (parsed.length < this.maxEntries && index > 0) {
-        const previous = readFileSync(this.#segmentPath(index - 1), 'utf8').split('\n').filter(Boolean)
-        const older = previous.slice(-(this.maxEntries - parsed.length))
-          .map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
-        parsed = [...older, ...parsed]
-      }
-      this.entries = parsed.slice(-this.maxEntries)
-      this.#pruneSegments()
-    } catch { /* The first run has no log. A corrupt log must not stop the API. */ }
-  }
-
-  /** Keep at most three segments so disk usage stays bounded without rewriting. */
-  #pruneSegments() {
-    for (const name of readdirSync(this.dir)) {
-      const match = /^requests\.jsonl\.(\d+)$/.exec(name)
-      if (!match) continue
-      if (Number(match[1]) < this.segment - 2) {
-        try { unlinkSync(resolve(this.dir, name)) } catch { /* ignore */ }
-      }
+    // Legacy deployments may have only numbered files, with gaps after pruning.
+    const files = this.#files()
+    this.segment = Math.max(0, ...files.filter((file) => Number.isFinite(file.index)).map((file) => file.index))
+    this.entries = this.#allEntries().slice(-this.maxEntries)
+    const active = files.find((file) => file.name === 'requests.jsonl')
+    if (active) {
+      try {
+        const text = readFileSync(active.path, 'utf8')
+        this.needsSeparator = text.length > 0 && !text.endsWith('\n')
+      } catch { /* The append path remains best-effort. */ }
     }
   }
 
-  /** Rotate instead of rewriting: a full segment starts a new file. */
   #rotate() {
-    try {
-      const size = this.#fileSize()
-      if (size < this.segmentBytes) return false
-      this.segment++
-      renameSync(this.path, `${this.path}.${this.segment}`)
-      this.#pruneSegments()
-      return true
-    } catch { return false }
+    const active = this.#logPath('requests.jsonl')
+    if (!existsSync(active) || lstatSync(active).size < this.segmentBytes) return
+    let next = this.segment + 1
+    while (existsSync(resolve(this.dir, `requests.jsonl.${next}`))) next++
+    const archive = this.#logPath(`requests.jsonl.${next}`)
+    renameSync(active, archive)
+    this.needsSeparator = false
+    this.segment = next
+    // Active file plus two archives. Prune by actual filenames, never by contiguous indexes.
+    const archives = this.#files().filter((file) => Number.isFinite(file.index))
+    const obsolete = archives.slice(0, -2)
+    for (const file of obsolete) unlinkSync(this.#logPath(file.name))
+    return obsolete.length > 0
   }
 
   #appendLine(record) {
+    if (!this.persist) return
     try {
-      this.#rotate()
-      appendFileSync(this.#segmentPath(this.segment), `${JSON.stringify(record)}\n`, { mode: 0o600 })
-    } catch { /* ignore */ }
+      const pruned = this.#rotate()
+      appendFileSync(this.#logPath('requests.jsonl'), `${this.needsSeparator ? '\n' : ''}${JSON.stringify(record)}\n`, { mode: 0o600 })
+      this.needsSeparator = false
+      if (pruned) this.entries = this.#allEntries({ includeMemory: false }).slice(-this.maxEntries)
+    } catch { /* A storage failure must not interrupt a response. */ }
   }
 
-  /**
-   * Persist one record. Always append-only: reaching maxEntries must never trigger
-   * a whole-file rewrite on the request path (that blocks the event loop and
-   * stalls streaming responses).
-   */
   #store(entry) {
     if (this.onFlush) {
       Promise.resolve(this.onFlush(this.entries)).catch(() => {})
       return
     }
-    if (!this.persist) return
     this.#appendLine(entry)
   }
 
-  begin({ id, model, stream, route, accountId }) {
+  begin({ id, model, stream, route = {}, accountId }) {
     const entry = {
       id, at: Date.now(), model: String(model || '').slice(0, 100), stream: Boolean(stream),
       route: route.selected ? 'gray' : 'stable', pool: route.pool, reason: route.reason,
       accountId: '', accountLabel: String(accountId || '').slice(0, 80), status: 'pending', ms: null,
       promptTokens: null, completionTokens: null, totalTokens: null,
-      cachedTokens: null, reasoningTokens: null, rate: null, error: '',
-      // Latency breakdown: first upstream byte, first streamed token, total.
-      firstByteMs: null, firstTokenMs: null, ttftMs: null,
+      cachedTokens: null, reasoningTokens: null, rate: null, error: '', errorType: '', attempts: null,
+      timingVersion: 2, responseHeadersMs: null, firstByteMs: null, firstTokenMs: null, ttftMs: null,
     }
     this.active.set(id, entry)
     return entry
   }
 
-  finish(id, { status = 200, usage, error = '', accountId, rate = null, marks = null } = {}) {
+  finish(id, { status = 200, usage, error = '', accountId, rate = null, marks = null, attempts = null, errorType = '', responseHeadersMs = null } = {}) {
     const entry = this.active.get(id)
     if (!entry) return
     this.active.delete(id)
     if (accountId) entry.accountId = String(accountId).slice(0, 80)
     delete entry.accountLabel
     entry.status = status
-    entry.ms = Date.now() - entry.at
+    entry.ms = Math.max(0, Date.now() - entry.at)
     entry.promptTokens = numberOrNull(usage?.prompt_tokens)
     entry.completionTokens = numberOrNull(usage?.completion_tokens)
     entry.totalTokens = numberOrNull(usage?.total_tokens)
-    // Upstream returns OpenAI-style detail objects; keep them for cache/thinking dashboards.
     entry.cachedTokens = numberOrNull(usage?.prompt_tokens_details?.cached_tokens)
     entry.reasoningTokens = numberOrNull(usage?.completion_tokens_details?.reasoning_tokens)
     entry.rate = rate || null
-    if (marks?.firstByteAt) entry.firstByteMs = marks.firstByteAt - entry.at
-    if (marks?.firstTokenAt) {
-      entry.firstTokenMs = marks.firstTokenAt - entry.at
-      entry.ttftMs = entry.firstTokenMs
+    const elapsed = (mark) => {
+      const value = numberOrNull(mark)
+      return value !== null && value >= entry.at && value <= entry.at + entry.ms ? value - entry.at : null
     }
-    // Never record upstream response bodies: they could contain an echoed credential.
-    entry.error = error ? String(error).slice(0, 160).replace(/(bearer|credential|token)\s*[:=]?\s*\S+/gi, '$1 [REDACTED]') : ''
+    entry.responseHeadersMs = elapsed(marks?.responseHeadersAt) ?? validDuration(responseHeadersMs, entry.ms)
+    entry.firstByteMs = elapsed(marks?.firstByteAt)
+    entry.firstTokenMs = elapsed(marks?.firstTokenAt)
+    entry.ttftMs = entry.firstTokenMs
+    entry.attempts = normalizeAttempts(attempts)
+    entry.errorType = String(errorType || '').slice(0, 80)
+    // Never record response bodies, headers, or arbitrary attempt objects.
+    entry.error = redact(error, 160)
     this.entries.push(entry)
-    if (this.entries.length > this.maxEntries) this.entries = this.entries.slice(-this.maxEntries)
+    this.entries = this.entries.slice(-this.maxEntries)
     this.#store(entry)
   }
 
-  /** Newest-first page. Response size is capped regardless of client input. */
+  /** Compatibility API: newest-first pages of the bounded memory ring. */
   page({ page = 1, pageSize = 50 } = {}) {
-    const size = Math.max(1, Math.min(Number(pageSize) || 50, this.pageSize))
-    const total = this.entries.length
-    const pages = Math.max(1, Math.ceil(total / size))
-    const index = Math.max(1, Math.min(Number(page) || 1, pages))
-    const end = total - (index - 1) * size
-    const start = Math.max(0, end - size)
-    return {
-      entries: this.entries.slice(start, end).reverse().map(normalizeEntry),
-      page: index, pageSize: size, pages, total,
-      maxEntries: this.maxEntries,
-    }
+    return { ...paginate([...this.entries].reverse().map(normalizeEntry), page, pageSize, this.pageSize), maxEntries: this.maxEntries }
   }
 
   recent(limit = 100) {
-    return this.entries.slice(-Math.max(1, Math.min(Number(limit) || 100, 500))).reverse()
+    return this.entries.slice(-clampInteger(limit, 100, 1, 500)).reverse()
   }
 
-  #fileSize() {
-    try { return statSync(this.path).size } catch { return 0 }
-  }
-
-  /** Test seam: exercises the rewrite path without any truncation risk in production. */
+  /** Append-only test seam; marker rows are excluded from requests and statistics. */
   flushNow() {
     this.#appendLine({ flushed: true })
   }
 
   clear() {
+    if (this.persist) {
+      // Validate all destinations first. Only exact log filenames can be removed.
+      const active = this.#logPath('requests.jsonl')
+      const archives = this.#files().filter((file) => Number.isFinite(file.index))
+      for (const file of archives) unlinkSync(this.#logPath(file.name))
+      writeFileSync(active, '', { mode: 0o600 })
+    }
     this.entries = []
-    if (!this.path) return
-    try { writeFileSync(this.path, '', { mode: 0o600 }) } catch { /* ignore */ }
+    this.active.clear()
+    this.segment = 0
+    this.needsSeparator = false
   }
 
-  /**
-   * Totals must cover every record on disk, not just the in-memory ring.
-   * The ring only exists for paging, so using it here made the 24h totals
-   * shrink as new requests pushed old entries out.
-   */
-  #allEntries({ since = 0 } = {}) {
-    if (!this.persist) return this.entries.filter((entry) => entry.at >= since)
-    const seen = new Set()
-    const out = []
-    const collect = (list) => {
-      for (const entry of list) {
-        if (!entry || entry.flushed || entry.at < since) continue
-        if (entry.id && seen.has(entry.id)) continue
-        if (entry.id) seen.add(entry.id)
-        out.push(entry)
+  #allEntries({ includeMemory = true } = {}) {
+    const records = []
+    if (this.persist) {
+      for (const file of this.#files()) {
+        try {
+          for (const line of readFileSync(file.path, 'utf8').split('\n')) {
+            try { records.push(JSON.parse(line)) } catch { /* Ignore partial or malformed lines. */ }
+          }
+        } catch { /* Unreadable segments must not hide the other segments. */ }
       }
     }
-    collect(this.entries)
-    // Read every retained segment within the requested window. Previously the
-    // cutoff was hard-coded to 24h, which made 72h silently discard older data.
-    for (let index = this.segment; index >= 0 && index >= this.segment - 2; index--) {
-      let text = ''
-      try { text = readFileSync(this.#segmentPath(index), 'utf8') } catch { continue }
-      collect(text.split('\n').filter(Boolean).map((line) => {
-        try { return JSON.parse(line) } catch { return null }
-      }))
+    if (includeMemory) records.push(...this.entries)
+    const seen = new Set()
+    const out = []
+    // Newest record wins, including the in-memory copy of a just-finished request.
+    for (let index = records.length - 1; index >= 0; index--) {
+      const entry = records[index]
+      if (!entry || entry.flushed || numberOrNull(entry.at) === null) continue
+      const key = entry.id ? `id:${entry.id}` : `row:${JSON.stringify(entry)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(entry)
     }
-    return out
+    return out.reverse()
   }
 
   modelIds() {
     return [...new Set(this.#allEntries().map((entry) => entry.model).filter(Boolean))]
   }
 
+  /** One retained-log snapshot and clock for rows, KPIs, models and chart buckets. */
+  query({ page = 1, pageSize = 50, hours = 24, model = '', accountId = '', status = 'all', q = '', sort = 'at', order = 'desc', until, bucketMs = null } = {}) {
+    const windowHours = windowSize(hours)
+    const snapshotUntil = numberOrNull(until)
+    const now = snapshotUntil ?? Date.now()
+    const search = String(q || '').trim().toLowerCase()
+    const retained = this.#allEntries().map(normalizeEntry).filter((entry) => {
+      if (entry.at > now || (model && entry.model !== model) || (accountId && entry.accountId !== accountId)) return false
+      // A request that finishes after a fixed snapshot must not appear on later pages.
+      // Legacy rows without any completion timing keep their available start-time bound.
+      const completedAt = numberOrNull(entry.completedAt) ?? (entry.ms !== null && entry.ms >= 0 ? entry.at + entry.ms : null)
+      if (snapshotUntil !== null && completedAt !== null && completedAt > snapshotUntil) return false
+      if (status === 'success' && !(entry.status >= 200 && entry.status < 400)) return false
+      if (status === 'error' && !(entry.status >= 400)) return false
+      return !search || ['id', 'model', 'accountId', 'status', 'route', 'pool', 'reason', 'error', 'errorType']
+        .some((key) => String(entry[key] ?? '').toLowerCase().includes(search))
+    })
+    const source = retained.filter((entry) => entry.at >= now - windowHours * 3600000)
+    const key = ['at', 'ms', 'outputTps', 'totalTokens'].includes(sort) ? sort : 'at'
+    const direction = order === 'asc' ? 1 : -1
+    const ordered = source.map((entry, index) => ({ entry, index })).sort((a, b) => {
+      const left = numberOrNull(a.entry[key])
+      const right = numberOrNull(b.entry[key])
+      if (left === null && right !== null) return 1
+      if (right === null && left !== null) return -1
+      return (left !== null && right !== null ? (left - right) * direction : 0)
+        || b.entry.at - a.entry.at || String(a.entry.id || '').localeCompare(String(b.entry.id || '')) || a.index - b.index
+    }).map(({ entry }) => entry)
+    return {
+      ...paginate(ordered, page, pageSize, this.pageSize), maxEntries: this.maxEntries,
+      stats: summarize(source, retained, windowHours, now),
+      breakdown: buildBreakdown(source, windowHours, now, bucketMs), windowHours, until: now,
+    }
+  }
+
   stats(hours = 24) {
-    const windowHours = Math.max(1, Math.min(Number(hours) || 24, 168))
-    const cutoff = Date.now() - windowHours * 3600000
-    const source = this.#allEntries({ since: cutoff })
-    const all = this.#allEntries()
-    const allDates = all.map((entry) => entry.at).filter(Number.isFinite)
-    const day = source.filter((entry) => entry.at >= cutoff)
-    const completed = day.filter((entry) => entry.ms !== null)
-    const failed = day.filter((entry) => entry.status >= 400)
-    const sum = (list, key) => list.reduce((total, entry) => total + (Number(entry[key]) || 0), 0)
-    const promptTokens = sum(day, 'promptTokens')
-    const cachedTokens = sum(day, 'cachedTokens')
-    const reasoningTokens = sum(day, 'reasoningTokens')
-    return {
-      total: source.length,
-      last24h: day.length,
-      failed24h: failed.length,
-      successRate: completed.length ? Math.round((1 - failed.length / completed.length) * 1000) / 10 : null,
-      averageMs: completed.length ? Math.round(sum(completed, 'ms') / completed.length) : null,
-      p50Ms: percentile(completed.map((entry) => Number(entry.ms)).filter(Number.isFinite), 0.5),
-      p95Ms: percentile(completed.map((entry) => Number(entry.ms)).filter(Number.isFinite), 0.95),
-      averageFirstByteMs: average(day.map((entry) => entry.firstByteMs).filter(Number.isFinite)),
-      averageFirstTokenMs: average(day.map((entry) => entry.ttftMs).filter(Number.isFinite)),
-      outputTps: aggregateOutputTps(day),
-      tokens24h: sum(day, 'totalTokens'),
-      promptTokens24h: promptTokens,
-      completionTokens24h: sum(day, 'completionTokens'),
-      cachedTokens24h: cachedTokens,
-      reasoningTokens24h: reasoningTokens,
-      // Cache hit rate = cached prompt tokens / all prompt tokens observed.
-      // Two decimals: a single 512-token hit against a large token total must not read as 0%.
-      cacheHitRate: promptTokens > 0 ? roundRate(cachedTokens / promptTokens) : null,
-      windowHours,
-      oldestAt: allDates.length ? Math.min(...allDates) : null,
-      newestAt: allDates.length ? Math.max(...allDates) : null,
-      allTimeRequests: all.length,
-      allTimeTokens: sum(all, 'totalTokens'),
-      allTimePromptTokens: sum(all, 'promptTokens'),
-      allTimeCompletionTokens: sum(all, 'completionTokens'),
-    }
+    return this.query({ hours }).stats
   }
 
-  /**
-   * Per-model and time-bucketed aggregates used by the dashboard charts.
-   * Bucket width adapts: hourly normally, finer when all traffic sits in a
-   * single hour (otherwise the series has one point and cannot form a line).
-   */
   breakdown(hours = 24, { bucketMs = null } = {}) {
-    const hourCount = Math.max(1, Math.min(Number(hours) || 24, 168))
-    const now = Date.now()
-    const span = hourCount * 3600000
-    const source = this.#allEntries({ since: now - span })
-    const populated = new Set()
-    for (const entry of source) {
-      if (entry.at >= now - span) populated.add(Math.floor(entry.at / 3600000))
-    }
-    // Choose granularity: keep at least ~6 buckets populated when traffic is sparse.
-    const adaptiveWidth = populated.size <= 2 ? 5 * 60000 : populated.size <= 8 ? 15 * 60000 : 3600000
-    // Multi-day windows must not shrink below the 288-bucket budget: 5-minute
-    // buckets over 72h would otherwise cover only the most recent 24h.
-    const width = bucketMs || (hourCount > 24
-      ? Math.max(adaptiveWidth, Math.ceil(span / 288))
-      : adaptiveWidth)
-    const bucketCount = Math.max(1, Math.min(Math.ceil(span / width), 288))
-    const start = now - bucketCount * width
-    const byModel = new Map()
-    const byHour = Array.from({ length: bucketCount }, (_, index) => ({
-      at: start + index * width, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, failed: 0,
-    }))
-    for (const entry of source) {
-      if (entry.at < start) continue
-      const model = entry.model || 'unknown'
-      const row = byModel.get(model) || { model, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, ms: 0, generationMs: 0, failed: 0 }
-      row.requests++
-      row.prompt += Number(entry.promptTokens) || 0
-      row.completion += Number(entry.completionTokens) || 0
-      row.cached += Number(entry.cachedTokens) || 0
-      row.reasoning += Number(entry.reasoningTokens) || 0
-      row.total += Number(entry.totalTokens) || 0
-      row.ms += Number(entry.ms) || 0
-      row.generationMs += timingMetrics(entry).generationMs || 0
-      if (entry.status >= 400) row.failed++
-      byModel.set(model, row)
-      const index = Math.min(bucketCount - 1, Math.floor((entry.at - start) / width))
-      const hour = byHour[index]
-      hour.requests++
-      hour.prompt += Number(entry.promptTokens) || 0
-      hour.completion += Number(entry.completionTokens) || 0
-      hour.cached += Number(entry.cachedTokens) || 0
-      hour.reasoning += Number(entry.reasoningTokens) || 0
-      hour.total += Number(entry.totalTokens) || 0
-      if (entry.status >= 400) hour.failed++
-    }
-    // Short windows retain the compact focused view. Multi-day windows keep
-    // their complete axis so 72h cannot collapse into only the active hours.
-    let output = byHour
-    if (bucketMs || hourCount <= 24) {
-      const filled = byHour.map((bucket, index) => bucket.requests ? index : -1).filter((index) => index >= 0)
-      if (filled.length && filled.length < byHour.length) {
-        const padding = Math.max(2, Math.round(byHour.length * 0.08))
-        const from = Math.max(0, filled[0] - padding)
-        const to = Math.min(byHour.length - 1, filled[filled.length - 1] + padding)
-        output = byHour.slice(from, to + 1)
-      }
-    }
-    return {
-      bucketMs: width,
-      bucketStart: output[0]?.at ?? start,
-      bucketEnd: now,
-      buckets: output.length,
-      byModel: [...byModel.values()].map((row) => ({
-        ...row,
-        averageMs: row.requests ? Math.round(row.ms / row.requests) : null,
-        outputTps: row.completion > 0 && row.generationMs > 0 ? roundTps(row.completion / (row.generationMs / 1000)) : null,
-        cacheHitRate: row.prompt ? roundRate(row.cached / row.prompt) : null,
-      })).sort((a, b) => b.requests - a.requests),
-      byHour: output,
-      coverage: {
-        requests: byHour.reduce((total, bucket) => total + bucket.requests, 0),
-        firstRequestAt: byHour.find((bucket) => bucket.requests)?.at || null,
-        lastRequestAt: [...byHour].reverse().find((bucket) => bucket.requests)?.at || null,
-      },
-    }
+    return this.query({ hours, bucketMs }).breakdown
   }
 }
 
-function roundRate(ratio) {
-  const percent = ratio * 100
-  if (percent === 0) return 0
-  if (percent < 1) return Math.round(percent * 100) / 100
-  return Math.round(percent * 10) / 10
+function paginate(entries, page, pageSize, cap) {
+  const size = clampInteger(pageSize, 50, 1, cap)
+  const total = entries.length
+  const pages = Math.max(1, Math.ceil(total / size))
+  const index = clampInteger(page, 1, 1, pages)
+  return { entries: entries.slice((index - 1) * size, index * size), page: index, pageSize: size, pages, total }
 }
 
-/** Rows written before a field existed must read as "unknown", never as a real zero. */
-function normalizeEntry(entry) {
+function summarize(source, retained, windowHours, until) {
+  const durations = source.map((entry) => numberOrNull(entry.ms)).filter((value) => value !== null && value >= 0)
+  const completed = source.filter((entry) => entry.status >= 200)
+  const failed = source.filter((entry) => entry.status >= 400)
+  const promptTokens = sum(source, 'promptTokens')
+  const cachedTokens = sum(source, 'cachedTokens')
+  const dates = retained.reduce((bounds, entry) => ({
+    oldestAt: bounds.oldestAt === null ? entry.at : Math.min(bounds.oldestAt, entry.at),
+    newestAt: bounds.newestAt === null ? entry.at : Math.max(bounds.newestAt, entry.at),
+  }), { oldestAt: null, newestAt: null })
+  const retainedLog = {
+    scope: 'retained-logs', permanent: false, requests: retained.length,
+    tokens: sum(retained, 'totalTokens'), promptTokens: sum(retained, 'promptTokens'),
+    completionTokens: sum(retained, 'completionTokens'),
+    ...dates,
+  }
   return {
-    ...entry,
-    promptTokens: entry.promptTokens ?? null,
-    completionTokens: entry.completionTokens ?? null,
-    totalTokens: entry.totalTokens ?? null,
-    cachedTokens: entry.cachedTokens ?? null,
-    reasoningTokens: entry.reasoningTokens ?? null,
-    ...timingMetrics(entry),
+    total: source.length, last24h: source.length, failed24h: failed.length,
+    successRate: completed.length ? Math.round((1 - failed.length / completed.length) * 1000) / 10 : null,
+    averageMs: average(durations), p50Ms: percentile(durations, 0.5), p95Ms: percentile(durations, 0.95),
+    averageResponseHeadersMs: average(source.map((entry) => entry.responseHeadersMs).filter(Number.isFinite)),
+    averageFirstByteMs: average(source.map((entry) => entry.firstByteMs).filter(Number.isFinite)),
+    averageFirstTokenMs: average(source.filter((entry) => entry.hasTtft).map((entry) => entry.ttftMs)),
+    ...speedSummary(source), latencySamples: durations.length,
+    tokens24h: sum(source, 'totalTokens'), promptTokens24h: promptTokens,
+    completionTokens24h: sum(source, 'completionTokens'), cachedTokens24h: cachedTokens,
+    reasoningTokens24h: sum(source, 'reasoningTokens'),
+    cacheHitRate: promptTokens > 0 ? roundRate(cachedTokens / promptTokens) : null,
+    windowHours, until, retainedLog,
+    // Compatibility names refer only to retained files, never permanent lifetime counters.
+    oldestAt: retainedLog.oldestAt, newestAt: retainedLog.newestAt,
+    allTimeRequests: retainedLog.requests, allTimeTokens: retainedLog.tokens,
+    allTimePromptTokens: retainedLog.promptTokens, allTimeCompletionTokens: retainedLog.completionTokens,
+  }
+}
+
+function buildBreakdown(source, hours, now, bucketMs) {
+  const span = hours * 3600000
+  const populated = new Set(source.map((entry) => Math.floor(entry.at / 3600000)))
+  const adaptive = populated.size <= 2 ? 5 * 60000 : populated.size <= 8 ? 15 * 60000 : 3600000
+  const explicit = numberOrNull(bucketMs)
+  const width = Math.max(explicit > 0 ? explicit : adaptive, Math.ceil(span / 288))
+  const count = Math.max(1, Math.ceil(span / width))
+  const start = now - span
+  const byHour = Array.from({ length: count }, (_, index) => ({
+    at: start + index * width, requests: 0, prompt: 0, completion: 0, cached: 0, reasoning: 0, total: 0, failed: 0,
+  }))
+  const models = new Map()
+  for (const entry of source) {
+    const model = entry.model || 'unknown'
+    const list = models.get(model) || []
+    list.push(entry)
+    models.set(model, list)
+    const bucket = byHour[Math.min(count - 1, Math.floor((entry.at - start) / width))]
+    bucket.requests++
+    for (const [target, field] of [['prompt', 'promptTokens'], ['completion', 'completionTokens'], ['cached', 'cachedTokens'], ['reasoning', 'reasoningTokens'], ['total', 'totalTokens']]) bucket[target] += numberOrNull(entry[field]) || 0
+    if (entry.status >= 400) bucket.failed++
+  }
+  let output = byHour
+  if (explicit > 0 || hours <= 24) {
+    const filled = byHour.map((bucket, index) => bucket.requests ? index : -1).filter((index) => index >= 0)
+    if (filled.length && filled.length < count) {
+      const padding = Math.max(2, Math.round(count * 0.08))
+      output = byHour.slice(Math.max(0, filled[0] - padding), Math.min(count, filled.at(-1) + padding + 1))
+    }
+  }
+  return {
+    bucketMs: width, bucketStart: output[0]?.at ?? start, bucketEnd: now, buckets: output.length,
+    byModel: [...models].map(([model, entries]) => {
+      const metrics = summarize(entries, entries, hours, now)
+      return {
+        model, requests: entries.length, prompt: sum(entries, 'promptTokens'), completion: sum(entries, 'completionTokens'),
+        cached: sum(entries, 'cachedTokens'), reasoning: sum(entries, 'reasoningTokens'), total: sum(entries, 'totalTokens'),
+        ms: sum(entries, 'ms'), generationMs: sum(entries.filter((entry) => entry.outputTps !== null), 'generationMs'),
+        failed: entries.filter((entry) => entry.status >= 400).length,
+        averageMs: metrics.averageMs, p50Ms: metrics.p50Ms, p95Ms: metrics.p95Ms, latencySamples: metrics.latencySamples,
+        ...speedSummary(entries), cacheHitRate: metrics.cacheHitRate,
+      }
+    }).sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model)),
+    byHour: output,
+    coverage: { requests: source.length, firstRequestAt: byHour.find((bucket) => bucket.requests)?.at ?? null, lastRequestAt: [...byHour].reverse().find((bucket) => bucket.requests)?.at ?? null },
+  }
+}
+
+function normalizeEntry(entry) {
+  const total = numberOrNull(entry.ms)
+  const firstToken = validDuration(entry.ttftMs, total) ?? validDuration(entry.firstTokenMs, total)
+  return {
+    ...entry, at: numberOrNull(entry.at), ms: total,
+    ...Object.fromEntries(['promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens', 'responseHeadersMs', 'firstByteMs', 'firstTokenMs'].map((key) => [key, numberOrNull(entry[key])])),
+    ttftMs: firstToken, timingVersion: entry.timingVersion ?? 1,
+    firstByteMeaning: numberOrNull(entry.firstByteMs) === null ? null : entry.timingVersion >= 2 ? 'body_byte' : 'historical_response_headers',
+    attempts: normalizeAttempts(entry.attempts), errorType: entry.errorType || '',
+    ...timingMetrics({ ...entry, ttftMs: firstToken }),
   }
 }
 
 export function timingMetrics(entry) {
-  const totalMs = Number(entry.ms)
-  const ttft = Number(entry.ttftMs)
-  const generationMs = Number.isFinite(totalMs) && totalMs > 0
-    ? (Number.isFinite(ttft) && ttft >= 0 && totalMs >= ttft ? totalMs - ttft : totalMs)
-    : null
-  const completion = Number(entry.completionTokens)
-  const prompt = Number(entry.promptTokens)
+  const totalMs = numberOrNull(entry.ms)
+  const ttft = validDuration(entry.ttftMs, totalMs) ?? validDuration(entry.firstTokenMs, totalMs)
+  const hasTtft = ttft !== null
+  const generationMs = totalMs !== null && totalMs > 0 && hasTtft ? totalMs - ttft : null
+  const completion = numberOrNull(entry.completionTokens)
+  const prompt = numberOrNull(entry.promptTokens)
   return {
-    generationMs: generationMs === null ? null : Math.round(generationMs),
-    outputTps: completion > 0 && generationMs > 0 ? roundTps(completion / (generationMs / 1000)) : null,
-    prefillTps: prompt > 0 && ttft > 0 ? roundTps(prompt / (ttft / 1000)) : null,
+    hasTtft, generationMs,
+    outputTps: completion > 0 && generationMs > 0 ? roundTps(completion * 1000 / generationMs) : null,
+    endToEndTps: completion > 0 && totalMs > 0 ? roundTps(completion * 1000 / totalMs) : null,
+    prefillTps: prompt > 0 && ttft > 0 ? roundTps(prompt * 1000 / ttft) : null,
   }
 }
 
-function roundTps(value) {
-  return Number.isFinite(value) ? Math.round(value * 10) / 10 : null
+function speedSummary(entries) {
+  const output = entries.filter((entry) => timingMetrics(entry).outputTps !== null)
+  const endToEnd = entries.filter((entry) => timingMetrics(entry).endToEndTps !== null)
+  const generation = output.reduce((total, entry) => total + timingMetrics(entry).generationMs, 0)
+  return {
+    outputTps: generation > 0 ? roundTps(sum(output, 'completionTokens') * 1000 / generation) : null,
+    endToEndTps: endToEnd.length ? roundTps(sum(endToEnd, 'completionTokens') * 1000 / sum(endToEnd, 'ms')) : null,
+    outputTpsSamples: output.length, endToEndTpsSamples: endToEnd.length,
+    ttftSamples: entries.filter((entry) => timingMetrics(entry).hasTtft).length,
+  }
 }
 
-function aggregateOutputTps(entries) {
-  let completion = 0
-  let generationMs = 0
-  for (const entry of entries) {
-    const timing = timingMetrics(entry)
-    if (Number(entry.completionTokens) > 0 && timing.generationMs > 0) {
-      completion += Number(entry.completionTokens)
-      generationMs += timing.generationMs
+function normalizeAttempts(value) {
+  if (!Array.isArray(value)) return numberOrNull(value)
+  return value.slice(0, 100).map((attempt) => {
+    if (!attempt || typeof attempt !== 'object') return null
+    const result = {}
+    for (const key of ['index', 'status', 'durationMs']) {
+      if (Object.hasOwn(attempt, key)) result[key] = numberOrNull(attempt[key])
     }
-  }
-  return generationMs > 0 ? roundTps(completion / (generationMs / 1000)) : null
+    for (const key of ['accountId', 'errorType', 'traceId']) {
+      if (attempt[key] !== undefined) result[key] = String(attempt[key]).slice(0, key === 'traceId' ? 160 : 80)
+    }
+    if (['chat', 'chat-after-renewal', 'renewal'].includes(attempt.action)) result.action = attempt.action
+    return result
+  }).filter(Boolean)
 }
 
-function average(values) {
-  return values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length) : null
+function redact(value, limit) {
+  return value ? String(value).slice(0, limit).replace(/(bearer|credential|token)\s*[:=]?\s*\S+/gi, '$1 [REDACTED]') : ''
 }
-
+function validDuration(value, total) {
+  const duration = numberOrNull(value)
+  return duration !== null && duration >= 0 && (total === null || duration <= total) ? duration : null
+}
+function sum(entries, key) { return entries.reduce((total, entry) => total + (numberOrNull(entry[key]) || 0), 0) }
+function windowSize(hours) { return Math.max(1, Math.min(numberOrNull(hours) || 24, 168)) }
+function clampInteger(value, fallback, min, max) { return Math.max(min, Math.min(Math.floor(numberOrNull(value) || fallback), max)) }
+function roundTps(value) { return Number.isFinite(value) ? Math.round(value * 10) / 10 : null }
+function roundRate(ratio) { const percent = ratio * 100; return percent < 1 ? Math.round(percent * 100) / 100 : Math.round(percent * 10) / 10 }
+function average(values) { return values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length) : null }
 function percentile(values, fraction) {
   if (!values.length) return null
   const sorted = [...values].sort((a, b) => a - b)
-  return Math.round(sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))])
+  return Math.round(sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)])
 }
-
 function numberOrNull(value) {
-  return Number.isFinite(value) ? value : null
+  if (typeof value !== 'number' && !(typeof value === 'string' && value.trim())) return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
 }
